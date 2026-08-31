@@ -410,7 +410,7 @@
 <figcaption><span class="site-name">Chez les parents</span> — box Orange</figcaption>
 </figure>
       <figure class="diagram">
-<svg viewBox="0 0 360 300" role="img" aria-label="Schema reseau du site : box internet reliee en WiFi a la Raspberry Pi robot (192.168.1.180) et a la Raspberry Pi serveur web (IP a definir), qui envoie ses ordres au robot">
+<svg viewBox="0 0 360 300" role="img" aria-label="Schema reseau du site : box internet reliee en WiFi a la Raspberry Pi robot (192.168.1.180) et a la Raspberry Pi serveur web (192.168.1.179), qui envoie ses ordres au robot">
   <defs>
     <marker id="arrow-Bbox" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
       <polygon points="0,0 10,5 0,10" class="dg-arrowhead" />
@@ -438,16 +438,16 @@
   <text x="90" y="212" text-anchor="middle" class="dg-text-mono" font-size="12">192.168.1.180</text>
 
   <!-- Pi 2 : serveur web -->
-  <rect x="195" y="150" width="150" height="86" class="dg-box-dashed" />
+  <rect x="195" y="150" width="150" height="86" class="dg-box" />
   <text x="270" y="175" text-anchor="middle" class="dg-text" font-size="12" font-weight="600">Raspberry Pi n2</text>
   <text x="270" y="191" text-anchor="middle" class="dg-text dg-muted" font-size="10.5">Serveur web (Flask)</text>
-  <text x="270" y="212" text-anchor="middle" class="dg-text-mono dg-muted" font-size="12">IP a definir</text>
+  <text x="270" y="212" text-anchor="middle" class="dg-text-mono" font-size="12">192.168.1.179</text>
 
   <!-- Order flow, Pi2 -> Pi1 -->
-  <path d="M270,236 L270,266 L90,266 L90,236" class="dg-line-dashed" marker-end="url(#arrow-Bbox)" />
-  <text x="180" y="286" text-anchor="middle" class="dg-text dg-muted" font-size="10.5">ordres du robot (HTTP -&gt; a definir)</text>
+  <path d="M270,236 L270,266 L90,266 L90,236" class="dg-accent-line" marker-end="url(#arrow-accent-Bbox)" />
+  <text x="180" y="286" text-anchor="middle" class="dg-accent-text" font-size="10.5">ordres du robot (HTTP -&gt; a definir)</text>
 </svg>
-<figcaption><span class="site-name">Chez Fabrice</span> — box Bbox — IP serveur web non communiquee</figcaption>
+<figcaption><span class="site-name">Chez Fabrice</span> — box Bbox</figcaption>
 </figure>
     </div>
 
@@ -585,7 +585,7 @@
 
   <section id="suite">
     <h2><span class="num">4.</span>À suivre</h2>
-    <p>Trois choses restent ouvertes pour que ce document soit complet : l'adresse IP de la Raspberry Pi n°2 (serveur web) côté Bbox, pour terminer le second schéma réseau ; le bug de <code>gps_delta.py</code>, à corriger avant de pouvoir calculer une vraie route vers la cible ; et la validation des coefficients PID sur le robot en conditions réelles, à l'intérieur et à basse vitesse dans un premier temps. Le second dépôt, pour le serveur web Flask de la Raspberry Pi n°2, reste également à créer.</p>
+    <p>Les deux schémas réseau sont maintenant complets, IP fixes réservées des deux côtés. Il reste : le bug de <code>gps_delta.py</code>, à corriger avant de pouvoir calculer une vraie route vers la cible ; la validation des coefficients PID sur le robot en conditions réelles, à l'intérieur et à basse vitesse dans un premier temps ; et le second dépôt GitHub, pour le serveur web Flask de la Raspberry Pi n°2, encore à créer.</p>
   </section>
 
 </main>
