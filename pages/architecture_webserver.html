@@ -1,0 +1,380 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Architecture du site web</title>
+<style>
+  :root {
+    --bg: #f7f5f0;
+    --surface: #ffffff;
+    --ink: #1a1a1a;
+    --muted: #6b6b6b;
+    --line: #ddd8cc;
+    --accent: #a13d2e;
+    --accent-bg: #f6e9e5;
+    --code-bg: #f1efe6;
+    --tag-req-bg: #e5eef6;
+    --tag-req-ink: #1f4e79;
+    --tag-res-bg: #e9f2e7;
+    --tag-res-ink: #2f6b32;
+    --node-bg: #ffffff;
+    --node-accent-bg: #f6e9e5;
+    --node-ext-bg: #f1efe6;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14120f;
+      --surface: #1c1a16;
+      --ink: #ece8de;
+      --muted: #9a9488;
+      --line: #3a362e;
+      --accent: #e0806b;
+      --accent-bg: #2c1c17;
+      --code-bg: #211f1a;
+      --tag-req-bg: #172531;
+      --tag-req-ink: #8fc2ef;
+      --tag-res-bg: #182619;
+      --tag-res-ink: #9bd39e;
+      --node-bg: #1c1a16;
+      --node-accent-bg: #2c1c17;
+      --node-ext-bg: #211f1a;
+    }
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: Georgia, "Times New Roman", serif;
+    line-height: 1.55;
+  }
+  .wrap { max-width: 880px; margin: 0 auto; padding: 56px 24px 90px; }
+
+  header { margin-bottom: 36px; }
+  .status {
+    display: inline-block;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--accent);
+    background: var(--accent-bg);
+    border: 1px solid var(--accent);
+    border-radius: 999px;
+    padding: 4px 12px;
+    margin-bottom: 14px;
+  }
+  h1 {
+    font-size: 30px;
+    margin: 0 0 6px;
+    font-weight: 600;
+  }
+  .subtitle { color: var(--muted); font-size: 15px; margin: 0; }
+
+  h2 {
+    font-size: 19px;
+    margin: 44px 0 12px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--line);
+    font-weight: 600;
+  }
+  h3 {
+    font-size: 15px;
+    margin: 28px 0 10px;
+    font-weight: 600;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  p { margin: 12px 0; }
+
+  code, .mono {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 0.92em;
+  }
+  code {
+    background: var(--code-bg);
+    border-radius: 4px;
+    padding: 1px 5px;
+  }
+
+  ul.notes { padding-left: 20px; }
+  ul.notes li { margin: 6px 0; }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 16px 0 8px;
+    font-size: 14.5px;
+    background: var(--surface);
+  }
+  caption {
+    text-align: left;
+    font-size: 13px;
+    color: var(--muted);
+    margin-bottom: 8px;
+    font-style: italic;
+  }
+  th, td {
+    border-bottom: 1px solid var(--line);
+    padding: 10px 12px;
+    text-align: left;
+    vertical-align: top;
+  }
+  th {
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--muted);
+    font-weight: 600;
+  }
+  td.file { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; white-space: nowrap; }
+
+  .back-link {
+    display: inline-block;
+    margin-bottom: 18px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 13px;
+    color: var(--muted);
+    text-decoration: none;
+  }
+  .back-link:hover { color: var(--ink); }
+
+  footer {
+    margin-top: 60px;
+    padding-top: 16px;
+    border-top: 1px solid var(--line);
+    font-size: 13px;
+    color: var(--muted);
+  }
+
+  /* -- Dependency diagram: plain CSS boxes/arrows, no image or JS library
+     so it stays readable offline on the local network like the rest of
+     the site. Two "zones" (Pi n2 running this app, Pi n1 = the robot
+     repo, reached only over the network) each hold a small flow of
+     nodes connected by arrows. */
+  .diagram {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    margin: 20px 0 8px;
+  }
+  .diagram-zone {
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 18px 20px 20px;
+    background: var(--surface);
+  }
+  .diagram-zone.ext { border-style: dashed; }
+  .diagram-zone-label {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.07em;
+    color: var(--muted);
+    margin-bottom: 14px;
+  }
+  .diagram-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 10px;
+    margin: 8px 0;
+  }
+  .diagram-row.indent { padding-left: 28px; }
+  .node {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 12.5px;
+    background: var(--node-bg);
+    border: 1px solid var(--line);
+    border-radius: 7px;
+    padding: 7px 11px;
+    white-space: nowrap;
+  }
+  .node.main { background: var(--node-accent-bg); border-color: var(--accent); font-weight: 600; }
+  .node.ext { background: var(--node-ext-bg); font-style: italic; }
+  .arrow {
+    color: var(--muted);
+    font-size: 13px;
+    white-space: nowrap;
+  }
+  .arrow .lbl {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 10.5px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  .diagram-link {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 2px;
+    margin: 4px 0;
+    color: var(--muted);
+    font-size: 12px;
+    text-align: center;
+  }
+  .diagram-link .lbl {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 11px;
+    background: var(--code-bg);
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    padding: 2px 10px;
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <a class="back-link" href="/control">&larr; Retour a la page de controle</a>
+    <div class="status">Documentation technique &mdash; mise a jour au fil des changements</div>
+    <h1>Architecture du site web</h1>
+    <p class="subtitle">Vue d'ensemble des fichiers du projet <code>robot-webserver</code> (Raspberry Pi n2) et de leurs dependances, cote code comme cote reseau. Cette page decrit le site ; voir <a href="/pages/protocole_controle.html">le protocole de controle</a> pour le detail des trames echangees avec le robot.</p>
+  </header>
+
+  <section>
+    <h2>Schema general des dependances</h2>
+    <p>Deux zones : ce que ce depot fait tourner sur la Pi n2, et ce a quoi il parle sur la Pi n1 (depot <code>robot</code>, documente separement). Une fleche pleine = import Python direct ; une fleche en pointilles = appel reseau.</p>
+
+    <div class="diagram">
+      <div class="diagram-zone">
+        <div class="diagram-zone-label">Raspberry Pi n&deg;2 &mdash; ce depot (robot-webserver)</div>
+
+        <div class="diagram-row">
+          <span class="node">.env / .env.example</span>
+          <span class="arrow">&mdash;configure&rarr;</span>
+          <span class="node main">app.py</span>
+        </div>
+        <div class="diagram-row indent">
+          <span class="arrow">&rarr; importe</span>
+          <span class="node">robot_link.py</span>
+          <span class="arrow">&rarr; importe</span>
+          <span class="node">nmea.py</span>
+        </div>
+        <div class="diagram-row indent">
+          <span class="arrow">&rarr; sert (statique)</span>
+          <span class="node">pages/*.html</span>
+        </div>
+        <div class="diagram-row indent">
+          <span class="arrow">&rarr; sert (statique)</span>
+          <span class="node">media/videos/, media/images/</span>
+        </div>
+        <div class="diagram-row">
+          <span class="node">generate_password.py</span>
+          <span class="arrow">&mdash;alimente (manuel)&rarr;</span>
+          <span class="node">.env</span>
+        </div>
+      </div>
+
+      <div class="diagram-link">
+        <span class="lbl">TCP 5050 (robot_link.py)</span>
+        &#8595;
+      </div>
+      <div class="diagram-link">
+        <span class="lbl">HTTP 8000, route /media/camera (app.py)</span>
+        &#8595;
+      </div>
+
+      <div class="diagram-zone ext">
+        <div class="diagram-zone-label">Raspberry Pi n&deg;1 &mdash; depot "robot" (documente a part)</div>
+        <div class="diagram-row">
+          <span class="node ext">link/server.py</span>
+          <span class="node ext">camera/stream_server.py</span>
+        </div>
+      </div>
+    </div>
+
+    <p style="color: var(--muted); font-size: 13.5px;"><code>nmea.py</code> est une copie volontaire de <code>link/nmea.py</code> du depot robot (les deux projets se deploient independamment) &mdash; a garder synchronisee si le format des trames change, voir <a href="/pages/protocole_controle.html">la page protocole</a>.</p>
+  </section>
+
+  <section>
+    <h2>Fichiers de l'application</h2>
+
+    <h3>Coeur du site (racine du depot)</h3>
+    <table>
+      <thead>
+        <tr><th>Fichier</th><th>Role</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td class="file">app.py</td>
+          <td>Application Flask principale : toutes les routes (<code>/login</code>, <code>/control</code>, <code>/pages</code>, <code>/api/send</code>, <code>/media/*</code>), generees en HTML inline (pas de dossier <code>templates/</code>). Gere l'authentification par session, relaie les commandes de la console vers le robot via <code>robot_link.send_command</code>, et proxy le flux camera en direct depuis <code>camera/stream_server.py</code>. La page <code>/control</code> (bandeau d'etat, console a deux onglets Console/TCP, boutons de commande) y est entierement construite cote serveur puis animee en JavaScript. C'est le point d'entree unique du site : les autres modules ne sont jamais charges que par lui.</td>
+        </tr>
+        <tr>
+          <td class="file">robot_link.py</td>
+          <td>Client TCP minimal : ouvre une connexion vers <code>link/server.py</code> (Pi n1), envoie une trame, lit une ligne de reponse, ferme. Utilise par <code>app.py</code> dans la route <code>/api/send</code>, elle-meme appelee par la console et par le sondage automatique du bandeau d'etat. Construit la trame via <code>nmea.build_sentence</code> et l'analyse via <code>nmea.parse_sentence</code>. Retourne toujours un dictionnaire avec au moins <code>ok</code> et <code>sent</code>, jamais d'exception laissee remonter jusqu'a Flask.</td>
+        </tr>
+        <tr>
+          <td class="file">nmea.py</td>
+          <td>Construction et analyse des trames <code>$PROV,...*hh</code> : <code>build_sentence</code>, <code>parse_sentence</code>, calcul du checksum XOR. Copie exacte de <code>link/nmea.py</code> du depot robot, sans dependance externe. Utilise uniquement par <code>robot_link.py</code>. Voir <a href="/pages/protocole_controle.html">la page protocole</a> pour le format complet.</td>
+        </tr>
+        <tr>
+          <td class="file">generate_password.py</td>
+          <td>Script a lancer a la main (<code>python3 generate_password.py</code>) pour obtenir la valeur de <code>WEBSERVER_PASSWORD_HASH</code>. Demande le mot de passe deux fois au clavier (jamais affiche), le hache avec <code>werkzeug.security.generate_password_hash</code>, et affiche la ligne a coller dans <code>.env</code>. N'est importe par aucun autre fichier du projet ; le mot de passe en clair n'est jamais ecrit sur disque.</td>
+        </tr>
+        <tr>
+          <td class="file">requirements.txt</td>
+          <td>Liste des dependances Python du site : <code>flask</code>, <code>python-dotenv</code>, <code>requests</code>. Installe avec <code>pip install -r requirements.txt</code>. Volontairement courte &mdash; contrairement au depot robot, ce site n'a pas de dependance materielle (GPIO, camera, port serie).</td>
+        </tr>
+        <tr>
+          <td class="file">.env / .env.example</td>
+          <td>Configuration d'execution, jamais versionnee pour <code>.env</code> (identifiants, cle de session) &mdash; <code>.env.example</code> sert de modele commente. Lu au demarrage par <code>app.py</code> via <code>load_dotenv()</code> : identifiants du site, adresse/port du robot (<code>ROBOT_HOST</code>/<code>ROBOT_PORT</code>) et de sa camera (<code>CAMERA_PORT</code>/<code>CAMERA_STREAM_PATH</code>).</td>
+        </tr>
+        <tr>
+          <td class="file">.gitignore</td>
+          <td>Exclut <code>.env</code> (secrets), <code>venv/</code> et les caches Python (<code>__pycache__/</code>) du depot Git. N'a aucun effet a l'execution, uniquement au moment des commits.</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h3>Pages statiques (pages/)</h3>
+    <p style="color: var(--muted); font-size: 13.5px; margin-top: -4px;">Servies telles quelles par <code>app.py</code> (route <code>/pages/&lt;fichier&gt;</code>, sans templating) pour ne jamais casser leur propre HTML/CSS ; elles apparaissent automatiquement dans la liste <code>/pages</code> des qu'un fichier <code>.html</code> est depose dans ce dossier.</p>
+    <table>
+      <thead>
+        <tr><th>Fichier</th><th>Role</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td class="file">protocole_controle.html</td>
+          <td>Reference vivante du protocole de commande du robot (trames NMEA proprietaires <code>$PROV,...</code>) : types de trames, exemples, checksum. Mise a jour a chaque evolution du protocole cote <code>link/server.py</code> du depot robot.</td>
+        </tr>
+        <tr>
+          <td class="file">rapport_rover_dgps.html</td>
+          <td>Rapport de projet autonome (schemas reseau des deux sites, organisation du code robot, pipeline DGPS/PID/PWM, courbes de reglage PID). Genere a un instant donne, pas mis a jour automatiquement avec le reste du code.</td>
+        </tr>
+        <tr>
+          <td class="file">architecture_webserver.html</td>
+          <td>Cette page &mdash; schema des dependances et role de chaque fichier de <code>robot-webserver</code>. A completer a chaque fichier ajoute ou retire du depot.</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h3>Contenus multimedia (media/)</h3>
+    <table>
+      <thead>
+        <tr><th>Dossier</th><th>Role</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td class="file">media/videos/</td>
+          <td>Videos (<code>.mp4</code>/<code>.webm</code>/<code>.ogg</code>/<code>.mov</code>) jouees en boucle une a la fois dans le panneau "Video feed" de <code>/control</code>, uniquement quand le flux camera en direct n'est pas disponible. Vide par defaut (juste un <code>.gitkeep</code>) &mdash; affiche alors un emplacement "coming soon".</td>
+        </tr>
+        <tr>
+          <td class="file">media/images/</td>
+          <td>Images (<code>.jpg</code>/<code>.jpeg</code>/<code>.png</code>/<code>.gif</code>/<code>.webp</code>) affichees en diaporama (3s par image) dans le panneau "Images" de <code>/control</code>. Sans rapport avec les snapshots <code>CAM,SNAP</code> du robot (voir <a href="/pages/protocole_controle.html">page protocole</a>) qui, eux, restent sur la Pi n1 dans <code>camera/tmp/</code> &mdash; ce dossier-ci est une galerie manuelle, deposee a la main.</td>
+        </tr>
+      </tbody>
+    </table>
+  </section>
+
+  <footer>
+    Robot mobile d'exterieur &mdash; page maintenue a la main, en parallele du code du site.
+  </footer>
+
+</div>
+</body>
+</html>

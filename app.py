@@ -13,17 +13,21 @@ Run with:
 Then, from any device on the same WiFi:
     http://<PI_2_IP>:5000/
 
-This server only serves static pages for now. Sending commands to the robot
-(Raspberry Pi #1) isn't wired in here yet -- see the "A suivre" section of
-the report for the protocol still to be defined.
+Commands typed into the /control console are relayed to the robot's TCP
+control server (Raspberry Pi #1, link/server.py in the robot repo) over
+plain sockets -- see robot_link.py and pages/protocole_controle.html for
+the NMEA-style sentence format.
 """
 import functools
 import os
 import secrets
 
+import requests
 from dotenv import load_dotenv
-from flask import Flask, abort, redirect, request, send_from_directory, session, url_for
+from flask import Flask, Response, abort, jsonify, redirect, request, send_from_directory, session, url_for
 from werkzeug.security import check_password_hash
+
+from robot_link import send_command
 
 load_dotenv()
 
@@ -34,6 +38,16 @@ IMAGES_DIR = os.path.join(MEDIA_DIR, "images")
 
 VIDEO_EXTENSIONS = (".mp4", ".webm", ".ogg", ".mov")
 IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".gif", ".webp")
+
+# Where the robot's control server (Pi #1, link/server.py) listens.
+ROBOT_HOST = os.environ.get("ROBOT_HOST", "192.168.1.180")
+ROBOT_PORT = int(os.environ.get("ROBOT_PORT", "5050"))
+
+# Where the robot's live camera stream (Pi #1, camera/stream_server.py)
+# listens. Same host as ROBOT_HOST -- only the port and path differ.
+CAMERA_PORT = int(os.environ.get("CAMERA_PORT", "8000"))
+CAMERA_STREAM_PATH = os.environ.get("CAMERA_STREAM_PATH", "/stream.mjpg")
+CAMERA_TIMEOUT = 3  # seconds -- how long to wait before giving up on the robot's camera
 
 # Credentials expected in .env (see .env.example): WEBSERVER_USERNAME and
 # WEBSERVER_PASSWORD_HASH (hash generated with generate_password.py, never
@@ -226,7 +240,17 @@ def _control_page(videos=None, images=None):
     after the last. Muted by default, native controls let sound be turned
     on manually.
     images: filenames in media/images/, cycled automatically every 3s as a
-    slideshow (client-side JS)."""
+    slideshow (client-side JS).
+
+    Video feed panel: the client-side JS also tries to load the robot's
+    live camera feed (proxied from Pi #1 through /media/camera, see that
+    route below) into a hidden <img>. As soon as it loads, it's shown in
+    place of the recorded video playlist/placeholder; if it errors out
+    (robot's camera script not running, wrong IP...) the recorded
+    playlist/placeholder is shown instead, and the camera is retried every
+    few seconds in the background -- so the panel switches over
+    automatically whenever the live feed becomes available, no reload
+    needed."""
     videos = videos or []
     images = images or []
 
@@ -292,6 +316,55 @@ def _control_page(videos=None, images=None):
       letter-spacing: 0.05em;
     }}
 
+    /* Status bar: below the fixed nav links, above the panels. Not fixed
+       itself (normal flow), so it needs a top margin to clear the fixed
+       .nav/.clock rows above it. Polled from the robot's STA telemetry
+       every few seconds (see script below). */
+    .status-bar {{
+      flex: 0 0 auto;
+      margin-top: 56px;
+      padding: 10px 24px;
+      border-bottom: 1px solid #30363d;
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 20px;
+      flex-wrap: wrap;
+    }}
+    .status-group {{
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      min-width: 150px;
+    }}
+    .status-group.status-group-right {{ align-items: flex-end; text-align: right; }}
+    .status-group.status-group-center {{
+      flex-direction: row;
+      gap: 28px;
+      flex: 1;
+      justify-content: center;
+      min-width: 220px;
+    }}
+    .status-metric {{
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 2px;
+      min-width: 64px;
+    }}
+    .status-label {{
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.07em;
+      color: #8b949e;
+    }}
+    .status-value {{
+      font-family: "Courier New", monospace;
+      font-size: 13.5px;
+      color: #e6edf3;
+      white-space: nowrap;
+    }}
+
     /* Main area: top ~two thirds, panels flow left to right. */
     .main-area {{
       flex: 2;
@@ -349,6 +422,26 @@ def _control_page(videos=None, images=None):
       background: #000;
     }}
 
+    /* Video feed panel wrapper: holds either the live camera image or the
+       recorded video/placeholder, never both at once (see script below). */
+    .video-feed-area {{
+      width: 100%;
+      height: 100%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }}
+
+    /* Live camera feed, proxied from the robot through /media/camera.
+       Hidden by default -- shown only once it actually loads. */
+    .camera-stream {{
+      max-width: 100%;
+      max-height: 100%;
+      border-radius: 8px;
+      object-fit: contain;
+    }}
+    .camera-stream[hidden] {{ display: none; }}
+
     /* Images panel: single <img>, source swapped every 3s by JS below. */
     .slideshow-img {{
       max-width: 100%;
@@ -357,9 +450,15 @@ def _control_page(videos=None, images=None):
       object-fit: contain;
     }}
 
-    /* Console: bottom third of the window. */
+    /* Console: bottom third of the window. min-height: 0 overrides the
+       flex default (min-height: auto), which otherwise lets this box grow
+       past its flex:1 share to fit however many lines consoleLog/tcpLog
+       accumulate -- without it the whole console panel silently got
+       taller (and scrolled off screen) as commands piled up instead of
+       staying put and scrolling internally. */
     .console {{
       flex: 1;
+      min-height: 0;
       background: #010409;
       border-top: 1px solid #30363d;
       display: flex;
@@ -375,16 +474,55 @@ def _control_page(videos=None, images=None):
       font-size: 11px;
       text-transform: uppercase;
       letter-spacing: 0.06em;
+      display: flex;
+      align-items: center;
     }}
+
+    /* Console tabs: "Console" (user-typed commands only, unchanged
+       behaviour) vs "TCP (all)" (every request/response this page sends to
+       the robot, including the background status-bar polling that never
+       appears in the Console tab). Only one of #consoleLog/#tcpLog is
+       shown at a time -- see showConsoleTab() below. */
+    .console-tabs {{ display: flex; gap: 4px; }}
+    .console-tab {{
+      background: transparent;
+      border: none;
+      color: #8b949e;
+      font-family: inherit;
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      padding: 3px 8px;
+      border-radius: 4px;
+      cursor: pointer;
+    }}
+    .console-tab:hover {{ color: #e6edf3; }}
+    .console-tab.active {{ color: #e6edf3; background: #21262d; }}
 
     .console-log {{
       flex: 1;
+      min-height: 0;
       overflow-y: auto;
       padding: 10px 14px;
       display: flex;
       flex-direction: column;
       gap: 3px;
     }}
+    .console-log[hidden] {{ display: none; }}
+
+    /* TCP tab: each request/response pair is grouped into one .tcp-frame
+       so old ones can be pruned as a unit (max MAX_TCP_FRAMES in the
+       script below, oldest dropped first) -- the tab stays a fixed size
+       instead of growing without bound. */
+    .tcp-frame {{
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      padding-bottom: 6px;
+      margin-bottom: 6px;
+      border-bottom: 1px solid #21262d;
+    }}
+    .tcp-frame:last-child {{ border-bottom: none; margin-bottom: 0; padding-bottom: 0; }}
 
     .console-log .line {{ white-space: pre-wrap; }}
     .console-log .ts  {{ color: #6e7681; margin-right: 8px; }}
@@ -392,6 +530,33 @@ def _control_page(videos=None, images=None):
     .console-log .ok  {{ color: #3fb950; }}
     .console-log .err {{ color: #ff7b72; }}
     .console-log .cmd {{ color: #e6edf3; }}
+
+    /* Controls panel: one full-width button per predefined NMEA sentence
+       (see pages/protocole_controle.html for the full reference) -- a
+       click doesn't send anything by itself, it just fills the console
+       input below with that sentence's beginning so the fields can be
+       completed before pressing Enter. */
+    .controls-buttons {{
+      width: 100%;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      overflow-y: auto;
+    }}
+    .cmd-button {{
+      width: 100%;
+      padding: 10px 12px;
+      background: #161b22;
+      color: #e6edf3;
+      border: 1px solid #30363d;
+      border-radius: 6px;
+      font-family: "Courier New", monospace;
+      font-size: 13px;
+      text-align: left;
+      cursor: pointer;
+    }}
+    .cmd-button:hover {{ background: #21262d; border-color: #58a6ff; }}
+    .cmd-button:active {{ background: #1c2129; }}
 
     .console-input {{
       display: flex;
@@ -415,19 +580,56 @@ def _control_page(videos=None, images=None):
 <body>
 
   <div class="nav">
-    <a href="{url_for('index')}">Pages</a>
+    <a href="{url_for('pages_index')}">Pages</a>
+    <a href="{url_for('serve_page', filename='protocole_controle.html')}">Protocol</a>
     <a href="{url_for('logout')}">Log out</a>
   </div>
   <div class="clock" id="clock">--:--:--</div>
 
+  <div class="status-bar">
+    <div class="status-group">
+      <span class="status-label">Position actuelle</span>
+      <span class="status-value" id="statusCurrentPos">--</span>
+    </div>
+    <div class="status-group status-group-center">
+      <div class="status-metric">
+        <span class="status-label">Distance</span>
+        <span class="status-value" id="statusDistance">--</span>
+      </div>
+      <div class="status-metric">
+        <span class="status-label">Cap</span>
+        <span class="status-value" id="statusBearing">--</span>
+      </div>
+      <div class="status-metric">
+        <span class="status-label">Vitesse</span>
+        <span class="status-value" id="statusSpeed">--</span>
+      </div>
+      <div class="status-metric">
+        <span class="status-label">Moteur G</span>
+        <span class="status-value" id="statusMotorLeft">--</span>
+      </div>
+      <div class="status-metric">
+        <span class="status-label">Moteur D</span>
+        <span class="status-value" id="statusMotorRight">--</span>
+      </div>
+    </div>
+    <div class="status-group status-group-right">
+      <span class="status-label">Position cible</span>
+      <span class="status-value" id="statusTargetPos">--</span>
+    </div>
+  </div>
+
   <div class="main-area">
     <div class="panel">
       <h2>Controls</h2>
-      <div class="placeholder">Buttons coming soon</div>
+      <div class="controls-buttons" id="controlsButtons"></div>
     </div>
     <div class="panel">
       <h2>Video feed</h2>
-      {video_html}
+      <div class="video-feed-area">
+        <img class="camera-stream" id="cameraStream" alt="Live camera feed" hidden>
+        <div id="recordedVideoArea">{video_html}</div>
+      </div>
     </div>
     <div class="panel panel-right">
       <h2>Images</h2>
@@ -436,9 +638,17 @@ def _control_page(videos=None, images=None):
   </div>
 
   <div class="console">
-    <div class="console-header">Robot console</div>
+    <div class="console-header">
+      <div class="console-tabs">
+        <button type="button" class="console-tab active" id="tabConsoleBtn">Console</button>
+        <button type="button" class="console-tab" id="tabTcpBtn">TCP (all)</button>
+      </div>
+    </div>
     <div class="console-log" id="consoleLog">
       <div class="line"><span class="ts">00:00:00</span><span class="sys">system: waiting for connection...</span></div>
+    </div>
+    <div class="console-log" id="tcpLog" hidden>
+      <div class="line"><span class="ts">00:00:00</span><span class="sys">system: raw TCP traffic to the robot appears here, including background polling hidden from the Console tab...</span></div>
     </div>
     <div class="console-input">
       <span class="prompt">&gt;</span>
@@ -462,6 +672,14 @@ def _control_page(videos=None, images=None):
       return `${{pad(now.getHours())}}:${{pad(now.getMinutes())}}:${{pad(now.getSeconds())}}`;
     }}
 
+    // logLine() writes one line to the visible Console tab (user-typed
+    // commands only). tcpLogFrame() writes to the TCP tab, which sees
+    // every request this page sends the robot, visible command or not --
+    // each call groups its lines (request + response) into one "frame"
+    // div so old frames can be pruned as a unit (see MAX_TCP_FRAMES
+    // below): the TCP tab must never grow past a handful of exchanges,
+    // oldest dropped first, so it stays a fixed size instead of scrolling
+    // forever.
     function logLine(text, cls) {{
       const log = document.getElementById("consoleLog");
       const div = document.createElement("div");
@@ -471,16 +689,258 @@ def _control_page(videos=None, images=None):
       log.scrollTop = log.scrollHeight;
     }}
 
+    const MAX_TCP_FRAMES = 10;
+    function tcpLogFrame(entries) {{
+      const log = document.getElementById("tcpLog");
+      const frame = document.createElement("div");
+      frame.className = "tcp-frame";
+      for (const {{text, cls}} of entries) {{
+        const div = document.createElement("div");
+        div.className = "line";
+        div.innerHTML = `<span class="ts">${{timestamp()}}</span><span class="${{cls}}">${{text}}</span>`;
+        frame.appendChild(div);
+      }}
+      log.appendChild(frame);
+      // Drop the oldest frame(s) first (document order) until at most
+      // MAX_TCP_FRAMES remain -- the initial "system: ..." line isn't a
+      // .tcp-frame, so it's never counted or removed here.
+      while (log.querySelectorAll(".tcp-frame").length > MAX_TCP_FRAMES) {{
+        log.querySelector(".tcp-frame").remove();
+      }}
+      log.scrollTop = log.scrollHeight;
+    }}
+
+    function escapeHtml(text) {{
+      const div = document.createElement("div");
+      div.textContent = text;
+      return div.innerHTML;
+    }}
+
+    // Sends one command to the robot via the Flask relay (/api/send), which
+    // opens a TCP connection to the robot's control server (Pi #1,
+    // link/server.py) and returns its ACK/ERR/STA response. Every call is
+    // logged to the TCP tab (tcpLogFrame) -- that tab is meant to show
+    // *all* communication, including the background status-bar polling
+    // below -- and additionally to the visible Console tab (logLine) only
+    // when logToConsole is true, i.e. for commands the user actually typed.
+    async function sendToRobot(command, {{logToConsole = false}} = {{}}) {{
+      let data;
+      try {{
+        const res = await fetch("{url_for('api_send')}", {{
+          method: "POST",
+          headers: {{"Content-Type": "application/json"}},
+          body: JSON.stringify({{command: command}}),
+        }});
+        data = await res.json();
+      }} catch (err) {{
+        const cmdText = "&gt; " + escapeHtml(command);
+        const errText = "request failed: " + escapeHtml(String(err));
+        tcpLogFrame([{{text: cmdText, cls: "cmd"}}, {{text: errText, cls: "err"}}]);
+        if (logToConsole) {{
+          logLine(cmdText, "cmd");
+          logLine(errText, "err");
+        }}
+        return {{ok: false, error: String(err)}};
+      }}
+
+      const cmdText = "&gt; " + escapeHtml(data.sent || command);
+      const resultText = data.ok
+        ? escapeHtml(data.raw_response || "")
+        : escapeHtml(data.error || data.raw_response || "unknown error");
+      const resultCls = data.ok ? "ok" : "err";
+
+      tcpLogFrame([{{text: cmdText, cls: "cmd"}}, {{text: resultText, cls: resultCls}}]);
+      if (logToConsole) {{
+        logLine(cmdText, "cmd");
+        logLine(resultText, resultCls);
+      }}
+
+      return data;
+    }}
+
+    async function sendCommand(cmd) {{
+      await sendToRobot(cmd, {{logToConsole: true}});
+    }}
+
     const input = document.getElementById("consoleInput");
     input.addEventListener("keydown", (e) => {{
       if (e.key === "Enter" && input.value.trim() !== "") {{
         const cmd = input.value.trim();
-        logLine("&gt; " + cmd, "cmd");
         input.value = "";
-        // Placeholder only: no backend wired in yet, protocol still to be defined.
-        logLine("no connection to robot (protocol not defined yet)", "err");
+        sendCommand(cmd);
       }}
     }});
+
+    // Console/TCP tab toggle: only one of #consoleLog/#tcpLog is visible
+    // at a time, both keep logging in the background regardless of which
+    // is shown.
+    const consoleLogEl = document.getElementById("consoleLog");
+    const tcpLogEl = document.getElementById("tcpLog");
+    const tabConsoleBtn = document.getElementById("tabConsoleBtn");
+    const tabTcpBtn = document.getElementById("tabTcpBtn");
+
+    function showConsoleTab(tab) {{
+      const showTcp = tab === "tcp";
+      consoleLogEl.hidden = showTcp;
+      tcpLogEl.hidden = !showTcp;
+      tabConsoleBtn.classList.toggle("active", !showTcp);
+      tabTcpBtn.classList.toggle("active", showTcp);
+    }}
+    tabConsoleBtn.addEventListener("click", () => showConsoleTab("console"));
+    tabTcpBtn.addEventListener("click", () => showConsoleTab("tcp"));
+
+    // Status bar: polls the robot for STA telemetry every few seconds and
+    // fills in current/target GPS position, distance/heading to the
+    // target (computed here client-side from the two positions -- kept
+    // independent from gps/gps_delta.py in the robot repo, which has a
+    // known bug), and the two motors' current PWM. Silent on failure (no
+    // console spam); falls back to "--" rather than showing a stale or
+    // made-up value.
+    const statusCurrentPos = document.getElementById("statusCurrentPos");
+    const statusTargetPos = document.getElementById("statusTargetPos");
+    const statusDistance = document.getElementById("statusDistance");
+    const statusBearing = document.getElementById("statusBearing");
+    const statusSpeed = document.getElementById("statusSpeed");
+    const statusMotorLeft = document.getElementById("statusMotorLeft");
+    const statusMotorRight = document.getElementById("statusMotorRight");
+
+    // Converts one NMEA ddmm.mmmm-style field (as used by NAV/STA) into
+    // decimal degrees. Works for both 2-digit (latitude) and 3-digit
+    // (longitude) degree prefixes without needing to know which: dividing
+    // by 100 always isolates the whole degrees, whatever their digit count.
+    function nmeaToDecimal(raw, dir) {{
+      const val = parseFloat(raw);
+      if (raw === undefined || raw === null || isNaN(val)) return null;
+      const deg = Math.trunc(val / 100);
+      const min = val - deg * 100;
+      let dec = deg + min / 60;
+      if (dir === "S" || dir === "W") dec = -dec;
+      return dec;
+    }}
+
+    function haversineMeters(lat1, lon1, lat2, lon2) {{
+      const R = 6371000;
+      const toRad = (d) => (d * Math.PI) / 180;
+      const dLat = toRad(lat2 - lat1);
+      const dLon = toRad(lon2 - lon1);
+      const a =
+        Math.sin(dLat / 2) ** 2 +
+        Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+      return 2 * R * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+    }}
+
+    function bearingDegrees(lat1, lon1, lat2, lon2) {{
+      const toRad = (d) => (d * Math.PI) / 180;
+      const toDeg = (r) => (r * 180) / Math.PI;
+      const y = Math.sin(toRad(lon2 - lon1)) * Math.cos(toRad(lat2));
+      const x =
+        Math.cos(toRad(lat1)) * Math.sin(toRad(lat2)) -
+        Math.sin(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.cos(toRad(lon2 - lon1));
+      return (toDeg(Math.atan2(y, x)) + 360) % 360;
+    }}
+
+    function formatLatLon(lat, lon) {{
+      return lat.toFixed(5) + "°, " + lon.toFixed(5) + "°";
+    }}
+
+    function resetStatusBar() {{
+      statusCurrentPos.textContent = "--";
+      statusTargetPos.textContent = "--";
+      statusDistance.textContent = "--";
+      statusBearing.textContent = "--";
+      statusSpeed.textContent = "--";
+    }}
+
+    let statusPollBusy = false;
+    async function pollStatus() {{
+      if (statusPollBusy) return;
+      statusPollBusy = true;
+      try {{
+        // logToConsole defaults to false: this background poll is exactly
+        // the "hidden" traffic that should only ever show up in the TCP
+        // tab, never spam the visible Console tab.
+        const data = await sendToRobot("STA");
+        if (!data.ok || !data.fields || data.fields.length < 14) {{
+          resetStatusBar();
+          return;
+        }}
+        // STA field order (see link/server.py and protocole_controle.html):
+        // lat, lat_dir, lon, lon_dir, cap, speed, left_pwm, right_pwm,
+        // battery, mode, target_lat, target_lat_dir, target_lon, target_lon_dir.
+        const [
+          lat, latDir, lon, lonDir, /* cap */, speed, leftPwm, rightPwm,
+          /* battery */, /* mode */,
+          targetLat, targetLatDir, targetLon, targetLonDir,
+        ] = data.fields;
+
+        statusMotorLeft.textContent = leftPwm;
+        statusMotorRight.textContent = rightPwm;
+        statusSpeed.textContent = speed + " km/h";
+
+        // lat/latDir and lon/lonDir are already grouped as
+        // (value, direction) pairs on the wire, so no assumption about
+        // hemisphere is made here: this robot operates just west of the
+        // meridian, so hardcoding "E" would actually be wrong for its own
+        // real position.
+        const curLat = nmeaToDecimal(lat, latDir);
+        const curLon = nmeaToDecimal(lon, lonDir);
+        const hasCurrent = curLat !== null && (curLat !== 0 || curLon !== 0);
+        statusCurrentPos.textContent = hasCurrent
+          ? formatLatLon(curLat, curLon)
+          : "GPS non disponible";
+
+        const tLat = nmeaToDecimal(targetLat, targetLatDir);
+        const tLon = nmeaToDecimal(targetLon, targetLonDir);
+        const hasTarget = tLat !== null && (tLat !== 0 || tLon !== 0);
+        statusTargetPos.textContent = hasTarget
+          ? formatLatLon(tLat, tLon)
+          : "Aucune cible (NAV)";
+
+        if (hasCurrent && hasTarget) {{
+          statusDistance.textContent = haversineMeters(curLat, curLon, tLat, tLon).toFixed(1) + " m";
+          statusBearing.textContent = bearingDegrees(curLat, curLon, tLat, tLon).toFixed(0) + "°";
+        }} else {{
+          statusDistance.textContent = "--";
+          statusBearing.textContent = "--";
+        }}
+      }} catch (err) {{
+        resetStatusBar();
+      }} finally {{
+        statusPollBusy = false;
+      }}
+    }}
+    pollStatus();
+    setInterval(pollStatus, 3000);
+
+    // Controls panel: one full-width button per predefined NMEA sentence
+    // (see pages/protocole_controle.html for the full field reference).
+    // Clicking a button never sends anything by itself -- it only fills
+    // the console input with that sentence's beginning (its type plus a
+    // trailing comma for types that take fields) so the specific values
+    // can be typed in before pressing Enter. The button's own label shows
+    // a complete example so it's clear what to fill in.
+    const commandButtons = [
+      {{label: "STP",                          prefix: "STP"}},
+      {{label: "DRV,120,120",                   prefix: "DRV,"}},
+      {{label: "NAV,4723.492,N,00044.340,W",    prefix: "NAV,"}},
+      {{label: "MOD,MANUAL",                    prefix: "MOD,"}},
+      {{label: "PID,D,1.0,0.0,0.5",             prefix: "PID,"}},
+      {{label: "CAM,SNAP",                      prefix: "CAM,"}},
+      {{label: "STA",                          prefix: "STA"}},
+    ];
+    const controlsButtons = document.getElementById("controlsButtons");
+    for (const {{label, prefix}} of commandButtons) {{
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "cmd-button";
+      btn.textContent = label;
+      btn.addEventListener("click", () => {{
+        input.value = prefix;
+        input.focus();
+        input.setSelectionRange(prefix.length, prefix.length);
+      }});
+      controlsButtons.appendChild(btn);
+    }}
 
     // Video playlist: one video at a time, auto-advances to the next when
     // the current one ends, wrapping back to the first after the last.
@@ -501,6 +961,37 @@ def _control_page(videos=None, images=None):
 
       playVideoAt(0);
     }}
+
+    // Live camera feed: tries to load the robot's live MJPEG stream
+    // (proxied through /media/camera so it stays behind this site's
+    // login). As soon as it loads, it takes the place of the recorded
+    // video playlist/placeholder; on error (robot's camera script not
+    // running, wrong IP...) the recorded playlist/placeholder is shown
+    // instead, and the feed is retried every few seconds -- so the panel
+    // switches over on its own once the live feed becomes available.
+    const cameraStream = document.getElementById("cameraStream");
+    const recordedVideoArea = document.getElementById("recordedVideoArea");
+    const CAMERA_URL = "{url_for('media_camera')}";
+    const CAMERA_RETRY_MS = 5000;
+
+    function tryCameraStream() {{
+      // Cache-bust so each retry is a fresh connection attempt instead of
+      // reusing a broken one.
+      cameraStream.src = CAMERA_URL + "?t=" + Date.now();
+    }}
+
+    cameraStream.addEventListener("load", () => {{
+      cameraStream.hidden = false;
+      recordedVideoArea.hidden = true;
+    }});
+
+    cameraStream.addEventListener("error", () => {{
+      cameraStream.hidden = true;
+      recordedVideoArea.hidden = false;
+      setTimeout(tryCameraStream, CAMERA_RETRY_MS);
+    }});
+
+    tryCameraStream();
 
     // Images slideshow: swap the <img> source every 3 seconds.
     const slideshowImages = [{image_urls_js}];
@@ -527,6 +1018,55 @@ def control():
     videos = _list_media(VIDEOS_DIR, VIDEO_EXTENSIONS)
     images = _list_media(IMAGES_DIR, IMAGE_EXTENSIONS)
     return _control_page(videos, images)
+
+
+@app.route("/api/send", methods=["POST"])
+@login_required
+def api_send():
+    """Relays one console command to the robot's control server and
+    returns its ACK/ERR/STA response as JSON. `command` is the sentence
+    type + fields the user typed, e.g. "STP" or "DRV,120,120" -- the
+    "$PROV," prefix and checksum are added by robot_link.send_command."""
+    data = request.get_json(silent=True) or {}
+    command = (data.get("command") or "").strip()
+    if not command:
+        return jsonify({"ok": False, "error": "EMPTY_COMMAND"}), 400
+
+    result = send_command(command, ROBOT_HOST, ROBOT_PORT)
+    return jsonify(result)
+
+
+@app.route("/media/camera")
+@login_required
+def media_camera():
+    """Proxies the robot's live MJPEG camera stream (Pi #1,
+    camera/stream_server.py in the robot repo) so the browser only ever
+    talks to this server -- the feed stays behind the login instead of
+    being reachable directly on the LAN. Returns 502 quickly (instead of
+    hanging) if the robot's camera script isn't running or unreachable, so
+    the /control page's <img> "error" handler fires and falls back to the
+    recorded video playlist."""
+    stream_url = f"http://{ROBOT_HOST}:{CAMERA_PORT}{CAMERA_STREAM_PATH}"
+    try:
+        upstream = requests.get(stream_url, stream=True, timeout=CAMERA_TIMEOUT)
+    except requests.exceptions.RequestException:
+        abort(502)
+
+    if upstream.status_code != 200:
+        upstream.close()
+        abort(502)
+
+    content_type = upstream.headers.get("Content-Type", "multipart/x-mixed-replace")
+
+    def relay():
+        try:
+            for chunk in upstream.iter_content(chunk_size=4096):
+                if chunk:
+                    yield chunk
+        finally:
+            upstream.close()
+
+    return Response(relay(), mimetype=content_type)
 
 
 @app.route("/media/videos/<path:filename>")
@@ -589,7 +1129,19 @@ def logout():
 @app.route("/")
 @login_required
 def index():
-    """Home page: lists the HTML pages available in pages/."""
+    """Root URL: /control is the landing page after login, so this just
+    redirects straight there. Kept as its own route (rather than moving
+    the redirect into login()) so that a stray "next=/" -- e.g. someone's
+    old bookmark of the bare root URL, which used to be the pages list --
+    still ends up on /control instead of resurrecting that old page."""
+    return redirect(url_for("control"))
+
+
+@app.route("/pages")
+@login_required
+def pages_index():
+    """Lists the HTML pages available in pages/ (moved here from / now
+    that /control is the landing page after login)."""
     if not os.path.isdir(PAGES_DIR):
         return _page("Robot web server", "<p>pages/ folder not found.</p>"), 500
 
@@ -626,5 +1178,8 @@ if __name__ == "__main__":
         print("ATTENTION: WEBSERVER_USERNAME / WEBSERVER_PASSWORD_HASH non definis dans .env "
               "-- personne ne pourra se connecter. Voir README.md.")
     # host="0.0.0.0": reachable from other devices on the WiFi, not just
-    # from the Pi itself (127.0.0.1).
-    app.run(host="0.0.0.0", port=5000, debug=False)
+    # from the Pi itself (127.0.0.1). threaded=True: without it, Flask's
+    # dev server handles one request at a time -- the live camera proxy
+    # (/media/camera) holds its connection open for as long as it's being
+    # viewed, which would otherwise block every other page/API call.
+    app.run(host="0.0.0.0", port=5000, debug=False, threaded=True)
