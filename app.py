@@ -56,7 +56,31 @@ CAMERA_TIMEOUT = 3  # seconds -- how long to wait before giving up on the robot'
 # but every server restart then logs everyone out.
 WEBSERVER_USERNAME = os.environ.get("WEBSERVER_USERNAME", "")
 WEBSERVER_PASSWORD_HASH = os.environ.get("WEBSERVER_PASSWORD_HASH", "")
+
+# Optional second, read-only account (e.g. for sharing the live status page
+# with someone over the internet without letting them drive the robot).
+# A viewer session can load /control and watch the status bar/telemetry,
+# but the Controls buttons and console command input are hidden client-side
+# AND rejected server-side in /api/send (except the harmless, argument-less
+# STA query, needed to keep the status bar working) -- see api_send() below.
+# Leave these two variables empty in .env to disable the viewer account
+# entirely (default).
+WEBSERVER_VIEWER_USERNAME = os.environ.get("WEBSERVER_VIEWER_USERNAME", "")
+WEBSERVER_VIEWER_PASSWORD_HASH = os.environ.get("WEBSERVER_VIEWER_PASSWORD_HASH", "")
+
 FLASK_SECRET_KEY = os.environ.get("FLASK_SECRET_KEY") or secrets.token_hex(32)
+
+# Commands a viewer/guest session is allowed to send via /api/send. STA has
+# no fields and only reads telemetry back, so it can't affect the robot --
+# every other sentence type (STP, DRV, NAV, MOD, PID, CAM...) is refused
+# for that role regardless of what the client sends.
+VIEWER_ALLOWED_COMMANDS = {"STA"}
+
+
+def _command_type(command):
+    """Returns the sentence type (first comma-separated token, upper-cased)
+    of a raw console command, e.g. "drv,120,120" -> "DRV"."""
+    return command.split(",", 1)[0].strip().upper()
 
 app = Flask(__name__)
 app.secret_key = FLASK_SECRET_KEY
@@ -225,7 +249,7 @@ def _login_page(next_url, error=None):
 </html>"""
 
 
-def _control_page(videos=None, images=None):
+def _control_page(videos=None, images=None, role="admin"):
     """Robot control page (landing page after login): clock fixed top-right,
     center split into three panels flowing left to right (Controls -- still
     a placeholder / Video feed / Images), bottom third is a terminal-style
@@ -241,6 +265,12 @@ def _control_page(videos=None, images=None):
     on manually.
     images: filenames in media/images/, cycled automatically every 3s as a
     slideshow (client-side JS).
+    role: "admin" (full access) or "viewer" (read-only guest account, see
+    WEBSERVER_VIEWER_USERNAME above) -- a viewer never sees the Controls
+    buttons or gets a usable console input, so there is no client-side way
+    to type or trigger a driving command; /api/send enforces the same
+    restriction server-side regardless, so this is a UX nicety, not the
+    actual security boundary.
 
     Video feed panel: the client-side JS also tries to load the robot's
     live camera feed (proxied from Pi #1 through /media/camera, see that
@@ -253,6 +283,26 @@ def _control_page(videos=None, images=None):
     needed."""
     videos = videos or []
     images = images or []
+    is_viewer = role == "viewer"
+
+    if is_viewer:
+        controls_html = (
+            '<div class="placeholder">Read-only access<br>'
+            "(controls disabled for this account)</div>"
+        )
+    else:
+        controls_html = '<div class="controls-buttons" id="controlsButtons"></div>'
+
+    if is_viewer:
+        console_input_html = """
+      <span class="prompt">&gt;</span>
+      <input id="consoleInput" type="text" placeholder="Read-only account -- command input disabled" disabled>
+"""
+    else:
+        console_input_html = """
+      <span class="prompt">&gt;</span>
+      <input id="consoleInput" type="text" placeholder="Type a command and press Enter" autocomplete="off">
+"""
 
     if videos:
         video_urls_js = ", ".join(f'"{url_for("media_video", filename=v)}"' for v in videos)
@@ -299,6 +349,16 @@ def _control_page(videos=None, images=None):
     }}
     .nav a {{ color: #8b949e; text-decoration: none; }}
     .nav a:hover {{ color: #e6edf3; }}
+    .viewer-badge {{
+      color: #d29922;
+      border: 1px solid #6e5b1f;
+      background: #3a2f0f;
+      padding: 1px 8px;
+      border-radius: 10px;
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }}
 
     /* Clock, fixed top-right corner, always visible. */
     .clock {{
@@ -542,7 +602,30 @@ def _control_page(videos=None, images=None):
       flex-direction: column;
       gap: 8px;
       overflow-y: auto;
+      /* flex:1 + min-height:0 make this box's height explicitly "whatever
+         is left in .panel below the Controls <h2>", rather than relying on
+         the (real but easy-to-break) flexbox rule that an item with a
+         non-visible overflow gets an automatic min-height of 0 instead of
+         its content size. Either way this box was already scrolling once
+         "GPS route" became the 8th button and pushed the list past that
+         space -- verified with Playwright at several window sizes -- but
+         the scroll was easy to miss with no visible scrollbar (a native
+         overlay scrollbar, invisible until hovered/dragged on macOS and
+         very thin on Windows/Linux). The rules below force a slim but
+         always-visible scrollbar so a cut-off button is never silently
+         hidden again, on any platform. */
+      flex: 1 1 auto;
+      min-height: 0;
+      scrollbar-width: thin;              /* Firefox */
+      scrollbar-color: #30363d #0d1117;   /* Firefox: thumb, track */
     }}
+    .controls-buttons::-webkit-scrollbar {{ width: 8px; }}
+    .controls-buttons::-webkit-scrollbar-track {{ background: #0d1117; }}
+    .controls-buttons::-webkit-scrollbar-thumb {{
+      background: #30363d;
+      border-radius: 4px;
+    }}
+    .controls-buttons::-webkit-scrollbar-thumb:hover {{ background: #58a6ff; }}
     .cmd-button {{
       width: 100%;
       padding: 10px 12px;
@@ -581,14 +664,14 @@ def _control_page(videos=None, images=None):
 
   <div class="nav">
     <a href="{url_for('pages_index')}">Pages</a>
-    <a href="{url_for('serve_page', filename='protocole_controle.html')}">Protocol</a>
     <a href="{url_for('logout')}">Log out</a>
+    {'<span class="viewer-badge">Read-only access</span>' if is_viewer else ''}
   </div>
   <div class="clock" id="clock">--:--:--</div>
 
   <div class="status-bar">
     <div class="status-group">
-      <span class="status-label">Position actuelle</span>
+      <span class="status-label">Current position</span>
       <span class="status-value" id="statusCurrentPos">--</span>
     </div>
     <div class="status-group status-group-center">
@@ -597,24 +680,24 @@ def _control_page(videos=None, images=None):
         <span class="status-value" id="statusDistance">--</span>
       </div>
       <div class="status-metric">
-        <span class="status-label">Cap</span>
+        <span class="status-label">Heading</span>
         <span class="status-value" id="statusBearing">--</span>
       </div>
       <div class="status-metric">
-        <span class="status-label">Vitesse</span>
+        <span class="status-label">Speed</span>
         <span class="status-value" id="statusSpeed">--</span>
       </div>
       <div class="status-metric">
-        <span class="status-label">Moteur G</span>
+        <span class="status-label">Motor L</span>
         <span class="status-value" id="statusMotorLeft">--</span>
       </div>
       <div class="status-metric">
-        <span class="status-label">Moteur D</span>
+        <span class="status-label">Motor R</span>
         <span class="status-value" id="statusMotorRight">--</span>
       </div>
     </div>
     <div class="status-group status-group-right">
-      <span class="status-label">Position cible</span>
+      <span class="status-label">Target position</span>
       <span class="status-value" id="statusTargetPos">--</span>
     </div>
   </div>
@@ -622,7 +705,7 @@ def _control_page(videos=None, images=None):
   <div class="main-area">
     <div class="panel">
       <h2>Controls</h2>
-      <div class="controls-buttons" id="controlsButtons"></div>
+      {controls_html}
     </div>
     <div class="panel">
       <h2>Video feed</h2>
@@ -650,10 +733,7 @@ def _control_page(videos=None, images=None):
     <div class="console-log" id="tcpLog" hidden>
       <div class="line"><span class="ts">00:00:00</span><span class="sys">system: raw TCP traffic to the robot appears here, including background polling hidden from the Console tab...</span></div>
     </div>
-    <div class="console-input">
-      <span class="prompt">&gt;</span>
-      <input id="consoleInput" type="text" placeholder="Type a command and press Enter" autocomplete="off">
-    </div>
+    <div class="console-input">{console_input_html}</div>
   </div>
 
   <script>
@@ -887,14 +967,14 @@ def _control_page(videos=None, images=None):
         const hasCurrent = curLat !== null && (curLat !== 0 || curLon !== 0);
         statusCurrentPos.textContent = hasCurrent
           ? formatLatLon(curLat, curLon)
-          : "GPS non disponible";
+          : "GPS unavailable";
 
         const tLat = nmeaToDecimal(targetLat, targetLatDir);
         const tLon = nmeaToDecimal(targetLon, targetLonDir);
         const hasTarget = tLat !== null && (tLat !== 0 || tLon !== 0);
         statusTargetPos.textContent = hasTarget
           ? formatLatLon(tLat, tLon)
-          : "Aucune cible (NAV)";
+          : "No target (NAV)";
 
         if (hasCurrent && hasTarget) {{
           statusDistance.textContent = haversineMeters(curLat, curLon, tLat, tLon).toFixed(1) + " m";
@@ -914,32 +994,126 @@ def _control_page(videos=None, images=None):
 
     // Controls panel: one full-width button per predefined NMEA sentence
     // (see pages/protocole_controle.html for the full field reference).
-    // Clicking a button never sends anything by itself -- it only fills
-    // the console input with that sentence's beginning (its type plus a
-    // trailing comma for types that take fields) so the specific values
-    // can be typed in before pressing Enter. The button's own label shows
-    // a complete example so it's clear what to fill in.
+    // Clicking most of these buttons never sends anything by itself -- it
+    // only fills the console input with that sentence's beginning (its
+    // type plus a trailing comma for types that take fields) so the
+    // specific values can be typed in before pressing Enter. The button's
+    // own label shows a complete example so it's clear what to fill in.
+    // "GPS route" is the one exception (action instead of prefix): a route
+    // can be arbitrarily long, so there's no reasonable text to prefill --
+    // it opens a file picker instead and sends a whole RTE sentence built
+    // from the file's content once one is chosen (see gpsRouteInput below).
     const commandButtons = [
       {{label: "STP",                          prefix: "STP"}},
       {{label: "DRV,120,120",                   prefix: "DRV,"}},
       {{label: "NAV,4723.492,N,00044.340,W",    prefix: "NAV,"}},
+      {{label: "GPS route",                     action: "gpsRoute"}},
       {{label: "MOD,MANUAL",                    prefix: "MOD,"}},
       {{label: "PID,D,1.0,0.0,0.5",             prefix: "PID,"}},
       {{label: "CAM,SNAP",                      prefix: "CAM,"}},
       {{label: "STA",                          prefix: "STA"}},
     ];
+
+    // Converts a signed decimal-degrees coordinate into this protocol's
+    // on-the-wire (ddmm.mmmm string, direction letter) pair -- a JS mirror
+    // of link/nmea.py's decimal_to_nmea() in the robot repo, needed here
+    // because an uploaded route file gives plain decimal coordinates but
+    // RTE (like NAV) is sent in NMEA ddmm.mmmm form.
+    function decimalToNmea(value, isLongitude) {{
+      const direction = isLongitude ? (value < 0 ? "W" : "E") : (value < 0 ? "S" : "N");
+      const magnitude = Math.abs(value);
+      const degrees = Math.floor(magnitude);
+      const minutes = (magnitude - degrees) * 60;
+      const degDigits = isLongitude ? 3 : 2;
+      const degStr = String(degrees).padStart(degDigits, "0");
+      const minStr = minutes.toFixed(3).padStart(6, "0");
+      return [degStr + minStr, direction];
+    }}
+
+    // Parses a GPS route file: one point per line as "lat,lon" in decimal
+    // degrees (e.g. 47.391534,-0.739006), blank lines and lines starting
+    // with "#" ignored. Extra columns past the first two are ignored too,
+    // so an unmodified 2-column export from a spreadsheet works fine.
+    function parseGpsRouteFile(text) {{
+      const points = [];
+      for (const rawLine of text.split(/\\r\\n|\\r|\\n/)) {{
+        const line = rawLine.trim();
+        if (!line || line.startsWith("#")) continue;
+        const parts = line.split(",");
+        if (parts.length < 2) continue;
+        const lat = parseFloat(parts[0]);
+        const lon = parseFloat(parts[1]);
+        if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
+        points.push([lat, lon]);
+      }}
+      return points;
+    }}
+
+    function buildRteCommand(points) {{
+      const fields = [String(points.length)];
+      for (const [lat, lon] of points) {{
+        const [latStr, latDir] = decimalToNmea(lat, false);
+        const [lonStr, lonDir] = decimalToNmea(lon, true);
+        fields.push(latStr, latDir, lonStr, lonDir);
+      }}
+      return "RTE," + fields.join(",");
+    }}
+
+    // Hidden file input backing the "GPS route" button -- only a real user
+    // click (not a script) is allowed to open the browser's file picker,
+    // so the button's own click handler below just forwards to this
+    // input's click() instead of showing a picker UI itself.
+    const gpsRouteInput = document.createElement("input");
+    gpsRouteInput.type = "file";
+    gpsRouteInput.accept = ".txt,.csv";
+    gpsRouteInput.hidden = true;
+    document.body.appendChild(gpsRouteInput);
+
+    gpsRouteInput.addEventListener("change", () => {{
+      const file = gpsRouteInput.files[0];
+      gpsRouteInput.value = "";  // lets the same file be re-picked later
+      if (!file) return;
+
+      const reader = new FileReader();
+      reader.onload = () => {{
+        const points = parseGpsRouteFile(String(reader.result));
+        if (points.length === 0) {{
+          logLine(
+            "GPS route: no valid point found in " + escapeHtml(file.name) +
+              " (expected one 'lat,lon' per line, decimal degrees)",
+            "err"
+          );
+          return;
+        }}
+        sendCommand(buildRteCommand(points));
+      }};
+      reader.onerror = () => {{
+        logLine("GPS route: could not read " + escapeHtml(file.name), "err");
+      }};
+      reader.readAsText(file);
+    }});
+
+    // controlsButtons doesn't exist for a read-only (viewer) session --
+    // that panel shows a plain message instead, see _control_page().
     const controlsButtons = document.getElementById("controlsButtons");
-    for (const {{label, prefix}} of commandButtons) {{
-      const btn = document.createElement("button");
-      btn.type = "button";
-      btn.className = "cmd-button";
-      btn.textContent = label;
-      btn.addEventListener("click", () => {{
-        input.value = prefix;
-        input.focus();
-        input.setSelectionRange(prefix.length, prefix.length);
-      }});
-      controlsButtons.appendChild(btn);
+    if (controlsButtons) {{
+      for (const buttonDef of commandButtons) {{
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "cmd-button";
+        btn.textContent = buttonDef.label;
+        if (buttonDef.action === "gpsRoute") {{
+          btn.title = "Pick a text file with one 'lat,lon' GPS point per line";
+          btn.addEventListener("click", () => gpsRouteInput.click());
+        }} else {{
+          btn.addEventListener("click", () => {{
+            input.value = buttonDef.prefix;
+            input.focus();
+            input.setSelectionRange(buttonDef.prefix.length, buttonDef.prefix.length);
+          }});
+        }}
+        controlsButtons.appendChild(btn);
+      }}
     }}
 
     // Video playlist: one video at a time, auto-advances to the next when
@@ -1017,7 +1191,7 @@ def _control_page(videos=None, images=None):
 def control():
     videos = _list_media(VIDEOS_DIR, VIDEO_EXTENSIONS)
     images = _list_media(IMAGES_DIR, IMAGE_EXTENSIONS)
-    return _control_page(videos, images)
+    return _control_page(videos, images, role=session.get("role", "admin"))
 
 
 @app.route("/api/send", methods=["POST"])
@@ -1026,11 +1200,20 @@ def api_send():
     """Relays one console command to the robot's control server and
     returns its ACK/ERR/STA response as JSON. `command` is the sentence
     type + fields the user typed, e.g. "STP" or "DRV,120,120" -- the
-    "$PROV," prefix and checksum are added by robot_link.send_command."""
+    "$PROV," prefix and checksum are added by robot_link.send_command.
+
+    A viewer/guest session (see WEBSERVER_VIEWER_USERNAME) is rejected here
+    with 403 for anything but the read-only STA query, regardless of what
+    the client sends -- the /control page already hides the means to send
+    other commands, but that's just UX: this check is the actual boundary,
+    since a guest could otherwise call this endpoint directly."""
     data = request.get_json(silent=True) or {}
     command = (data.get("command") or "").strip()
     if not command:
         return jsonify({"ok": False, "error": "EMPTY_COMMAND"}), 400
+
+    if session.get("role") == "viewer" and _command_type(command) not in VIEWER_ALLOWED_COMMANDS:
+        return jsonify({"ok": False, "error": "FORBIDDEN_READ_ONLY_ACCOUNT"}), 403
 
     result = send_command(command, ROBOT_HOST, ROBOT_PORT)
     return jsonify(result)
@@ -1091,7 +1274,11 @@ def media_image(filename):
 def login():
     """Login form. On success, redirects to the originally requested page
     (the 'next' parameter), otherwise to the control page (the landing page
-    after login)."""
+    after login). Two independent credential sets are accepted: the main
+    account (WEBSERVER_USERNAME/HASH, full access, role "admin") and an
+    optional read-only guest account (WEBSERVER_VIEWER_USERNAME/HASH, role
+    "viewer") -- see api_send() and _control_page() for what the "viewer"
+    role actually restricts."""
     error = None
     next_url = request.values.get("next") or url_for("control")
 
@@ -1099,20 +1286,29 @@ def login():
         username = request.form.get("username", "")
         password = request.form.get("password", "")
 
-        credentials_configured = bool(WEBSERVER_USERNAME and WEBSERVER_PASSWORD_HASH)
-        valid = (
-            credentials_configured
+        admin_configured = bool(WEBSERVER_USERNAME and WEBSERVER_PASSWORD_HASH)
+        viewer_configured = bool(WEBSERVER_VIEWER_USERNAME and WEBSERVER_VIEWER_PASSWORD_HASH)
+
+        is_admin = (
+            admin_configured
             and username == WEBSERVER_USERNAME
             and check_password_hash(WEBSERVER_PASSWORD_HASH, password)
         )
+        is_viewer = (
+            not is_admin
+            and viewer_configured
+            and username == WEBSERVER_VIEWER_USERNAME
+            and check_password_hash(WEBSERVER_VIEWER_PASSWORD_HASH, password)
+        )
 
-        if valid:
+        if is_admin or is_viewer:
             session.clear()
             session["logged_in"] = True
             session["username"] = username
+            session["role"] = "admin" if is_admin else "viewer"
             return redirect(next_url)
 
-        if not credentials_configured:
+        if not admin_configured:
             error = "No credentials configured on the server -- see .env.example in README.md."
         else:
             error = "Incorrect username or password."
@@ -1175,8 +1371,8 @@ def serve_page(filename):
 
 if __name__ == "__main__":
     if not (WEBSERVER_USERNAME and WEBSERVER_PASSWORD_HASH):
-        print("ATTENTION: WEBSERVER_USERNAME / WEBSERVER_PASSWORD_HASH non definis dans .env "
-              "-- personne ne pourra se connecter. Voir README.md.")
+        print("WARNING: WEBSERVER_USERNAME / WEBSERVER_PASSWORD_HASH not set in .env "
+              "-- nobody will be able to log in. See README.md.")
     # host="0.0.0.0": reachable from other devices on the WiFi, not just
     # from the Pi itself (127.0.0.1). threaded=True: without it, Flask's
     # dev server handles one request at a time -- the live camera proxy

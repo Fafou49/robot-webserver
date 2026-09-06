@@ -13,7 +13,17 @@ import socket
 
 from nmea import SentenceError, build_sentence, parse_sentence
 
-MAX_COMMAND_LENGTH = 200
+# 200 was plenty while every command fit on one line by hand (STP, DRV,
+# NAV...), but RTE can carry dozens of GPS waypoints (4 fields each,
+# ~20-24 characters per point) -- the robot repo caps a route at 200
+# points (ROUTE_MAX_POINTS in link/robot_state.py), so this needs enough
+# headroom for that many points plus the "RTE," prefix and count field,
+# with margin to spare. Silently truncating a route mid-sentence would be
+# far worse than just raising the cap: it either corrupts the last point
+# or (harmlessly, since link.robot_state.set_route validates field counts)
+# gets rejected with a clear RTE_FIELD_COUNT_MISMATCH error -- neither is
+# what anyone uploading a route file would expect.
+MAX_COMMAND_LENGTH = 8000
 
 
 def send_command(command_body: str, host: str, port: int, timeout: float = 2.0) -> dict:

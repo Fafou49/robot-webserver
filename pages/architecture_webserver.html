@@ -1,9 +1,9 @@
 <!doctype html>
-<html lang="fr">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Architecture du site web</title>
+<title>Web Server Architecture</title>
 <style>
   :root {
     --bg: #f7f5f0;
@@ -230,42 +230,42 @@
 <div class="wrap">
 
   <header>
-    <a class="back-link" href="/control">&larr; Retour a la page de controle</a>
-    <div class="status">Documentation technique &mdash; mise a jour au fil des changements</div>
-    <h1>Architecture du site web</h1>
-    <p class="subtitle">Vue d'ensemble des fichiers du projet <code>robot-webserver</code> (Raspberry Pi n2) et de leurs dependances, cote code comme cote reseau. Cette page decrit le site ; voir <a href="/pages/protocole_controle.html">le protocole de controle</a> pour le detail des trames echangees avec le robot.</p>
+    <a class="back-link" href="/control">&larr; Back to control page</a>
+    <div class="status">Technical documentation &mdash; updated as changes are made</div>
+    <h1>Web Server Architecture</h1>
+    <p class="subtitle">Overview of the <code>robot-webserver</code> project files (Raspberry Pi #2) and their dependencies, both on the code side and the network side. This page describes the web app; see <a href="/pages/protocole_controle.html">the control protocol</a> for details on the frames exchanged with the robot.</p>
   </header>
 
   <section>
-    <h2>Schema general des dependances</h2>
-    <p>Deux zones : ce que ce depot fait tourner sur la Pi n2, et ce a quoi il parle sur la Pi n1 (depot <code>robot</code>, documente separement). Une fleche pleine = import Python direct ; une fleche en pointilles = appel reseau.</p>
+    <h2>General dependency diagram</h2>
+    <p>Two zones: what this repo runs on Pi #2, and what it talks to on Pi #1 (the <code>robot</code> repo, documented separately). A solid arrow means a direct Python import; a dashed arrow means a network call.</p>
 
     <div class="diagram">
       <div class="diagram-zone">
-        <div class="diagram-zone-label">Raspberry Pi n&deg;2 &mdash; ce depot (robot-webserver)</div>
+        <div class="diagram-zone-label">Raspberry Pi #2 &mdash; this repo (robot-webserver)</div>
 
         <div class="diagram-row">
           <span class="node">.env / .env.example</span>
-          <span class="arrow">&mdash;configure&rarr;</span>
+          <span class="arrow">&mdash;configures&rarr;</span>
           <span class="node main">app.py</span>
         </div>
         <div class="diagram-row indent">
-          <span class="arrow">&rarr; importe</span>
+          <span class="arrow">&rarr; imports</span>
           <span class="node">robot_link.py</span>
-          <span class="arrow">&rarr; importe</span>
+          <span class="arrow">&rarr; imports</span>
           <span class="node">nmea.py</span>
         </div>
         <div class="diagram-row indent">
-          <span class="arrow">&rarr; sert (statique)</span>
+          <span class="arrow">&rarr; serves (static)</span>
           <span class="node">pages/*.html</span>
         </div>
         <div class="diagram-row indent">
-          <span class="arrow">&rarr; sert (statique)</span>
+          <span class="arrow">&rarr; serves (static)</span>
           <span class="node">media/videos/, media/images/</span>
         </div>
         <div class="diagram-row">
           <span class="node">generate_password.py</span>
-          <span class="arrow">&mdash;alimente (manuel)&rarr;</span>
+          <span class="arrow">&mdash;feeds (manual)&rarr;</span>
           <span class="node">.env</span>
         </div>
       </div>
@@ -275,12 +275,12 @@
         &#8595;
       </div>
       <div class="diagram-link">
-        <span class="lbl">HTTP 8000, route /media/camera (app.py)</span>
+        <span class="lbl">HTTP 8000, /media/camera route (app.py)</span>
         &#8595;
       </div>
 
       <div class="diagram-zone ext">
-        <div class="diagram-zone-label">Raspberry Pi n&deg;1 &mdash; depot "robot" (documente a part)</div>
+        <div class="diagram-zone-label">Raspberry Pi #1 &mdash; "robot" repo (documented separately)</div>
         <div class="diagram-row">
           <span class="node ext">link/server.py</span>
           <span class="node ext">camera/stream_server.py</span>
@@ -288,91 +288,91 @@
       </div>
     </div>
 
-    <p style="color: var(--muted); font-size: 13.5px;"><code>nmea.py</code> est une copie volontaire de <code>link/nmea.py</code> du depot robot (les deux projets se deploient independamment) &mdash; a garder synchronisee si le format des trames change, voir <a href="/pages/protocole_controle.html">la page protocole</a>.</p>
+    <p style="color: var(--muted); font-size: 13.5px;"><code>nmea.py</code> is a deliberate copy of <code>link/nmea.py</code> from the robot repo (the two projects are deployed independently) &mdash; keep it in sync if the frame format changes, see <a href="/pages/protocole_controle.html">the protocol page</a>.</p>
   </section>
 
   <section>
-    <h2>Fichiers de l'application</h2>
+    <h2>Application files</h2>
 
-    <h3>Coeur du site (racine du depot)</h3>
+    <h3>Site core (repo root)</h3>
     <table>
       <thead>
-        <tr><th>Fichier</th><th>Role</th></tr>
+        <tr><th>File</th><th>Role</th></tr>
       </thead>
       <tbody>
         <tr>
           <td class="file">app.py</td>
-          <td>Application Flask principale : toutes les routes (<code>/login</code>, <code>/control</code>, <code>/pages</code>, <code>/api/send</code>, <code>/media/*</code>), generees en HTML inline (pas de dossier <code>templates/</code>). Gere l'authentification par session, relaie les commandes de la console vers le robot via <code>robot_link.send_command</code>, et proxy le flux camera en direct depuis <code>camera/stream_server.py</code>. La page <code>/control</code> (bandeau d'etat, console a deux onglets Console/TCP, boutons de commande) y est entierement construite cote serveur puis animee en JavaScript. C'est le point d'entree unique du site : les autres modules ne sont jamais charges que par lui.</td>
+          <td>Main Flask application: all routes (<code>/login</code>, <code>/control</code>, <code>/pages</code>, <code>/api/send</code>, <code>/media/*</code>), rendered as inline HTML (no <code>templates/</code> folder). Handles session-based authentication, relays commands from the console to the robot via <code>robot_link.send_command</code>, and proxies the live camera stream from <code>camera/stream_server.py</code>. The <code>/control</code> page (status banner, two-tab Console/TCP console, command buttons) is built entirely server-side then animated with JavaScript. It is the site's single entry point: the other modules are only ever loaded by it.</td>
         </tr>
         <tr>
           <td class="file">robot_link.py</td>
-          <td>Client TCP minimal : ouvre une connexion vers <code>link/server.py</code> (Pi n1), envoie une trame, lit une ligne de reponse, ferme. Utilise par <code>app.py</code> dans la route <code>/api/send</code>, elle-meme appelee par la console et par le sondage automatique du bandeau d'etat. Construit la trame via <code>nmea.build_sentence</code> et l'analyse via <code>nmea.parse_sentence</code>. Retourne toujours un dictionnaire avec au moins <code>ok</code> et <code>sent</code>, jamais d'exception laissee remonter jusqu'a Flask.</td>
+          <td>Minimal TCP client: opens a connection to <code>link/server.py</code> (Pi #1), sends a frame, reads a response line, closes. Used by <code>app.py</code> in the <code>/api/send</code> route, itself called by the console and by the status banner's automatic polling. Builds the frame via <code>nmea.build_sentence</code> and parses it via <code>nmea.parse_sentence</code>. Always returns a dictionary with at least <code>ok</code> and <code>sent</code>, never lets an exception propagate up to Flask.</td>
         </tr>
         <tr>
           <td class="file">nmea.py</td>
-          <td>Construction et analyse des trames <code>$PROV,...*hh</code> : <code>build_sentence</code>, <code>parse_sentence</code>, calcul du checksum XOR. Copie exacte de <code>link/nmea.py</code> du depot robot, sans dependance externe. Utilise uniquement par <code>robot_link.py</code>. Voir <a href="/pages/protocole_controle.html">la page protocole</a> pour le format complet.</td>
+          <td>Builds and parses <code>$PROV,...*hh</code> frames: <code>build_sentence</code>, <code>parse_sentence</code>, XOR checksum computation. Exact copy of <code>link/nmea.py</code> from the robot repo, with no external dependency. Used only by <code>robot_link.py</code>. See <a href="/pages/protocole_controle.html">the protocol page</a> for the full format.</td>
         </tr>
         <tr>
           <td class="file">generate_password.py</td>
-          <td>Script a lancer a la main (<code>python3 generate_password.py</code>) pour obtenir la valeur de <code>WEBSERVER_PASSWORD_HASH</code>. Demande le mot de passe deux fois au clavier (jamais affiche), le hache avec <code>werkzeug.security.generate_password_hash</code>, et affiche la ligne a coller dans <code>.env</code>. N'est importe par aucun autre fichier du projet ; le mot de passe en clair n'est jamais ecrit sur disque.</td>
+          <td>Script to run by hand (<code>python3 generate_password.py</code>) to obtain the value of <code>WEBSERVER_PASSWORD_HASH</code>. Prompts for the password twice at the keyboard (never displayed), hashes it with <code>werkzeug.security.generate_password_hash</code>, and prints the line to paste into <code>.env</code>. Not imported by any other file in the project; the plaintext password is never written to disk.</td>
         </tr>
         <tr>
           <td class="file">requirements.txt</td>
-          <td>Liste des dependances Python du site : <code>flask</code>, <code>python-dotenv</code>, <code>requests</code>. Installe avec <code>pip install -r requirements.txt</code>. Volontairement courte &mdash; contrairement au depot robot, ce site n'a pas de dependance materielle (GPIO, camera, port serie).</td>
+          <td>List of the site's Python dependencies: <code>flask</code>, <code>python-dotenv</code>, <code>requests</code>. Installed with <code>pip install -r requirements.txt</code>. Deliberately short &mdash; unlike the robot repo, this site has no hardware dependency (GPIO, camera, serial port).</td>
         </tr>
         <tr>
           <td class="file">.env / .env.example</td>
-          <td>Configuration d'execution, jamais versionnee pour <code>.env</code> (identifiants, cle de session) &mdash; <code>.env.example</code> sert de modele commente. Lu au demarrage par <code>app.py</code> via <code>load_dotenv()</code> : identifiants du site, adresse/port du robot (<code>ROBOT_HOST</code>/<code>ROBOT_PORT</code>) et de sa camera (<code>CAMERA_PORT</code>/<code>CAMERA_STREAM_PATH</code>).</td>
+          <td>Runtime configuration, <code>.env</code> is never committed (credentials, session key) &mdash; <code>.env.example</code> serves as a commented template. Read at startup by <code>app.py</code> via <code>load_dotenv()</code>: site credentials, the robot's address/port (<code>ROBOT_HOST</code>/<code>ROBOT_PORT</code>) and its camera's (<code>CAMERA_PORT</code>/<code>CAMERA_STREAM_PATH</code>).</td>
         </tr>
         <tr>
           <td class="file">.gitignore</td>
-          <td>Exclut <code>.env</code> (secrets), <code>venv/</code> et les caches Python (<code>__pycache__/</code>) du depot Git. N'a aucun effet a l'execution, uniquement au moment des commits.</td>
+          <td>Excludes <code>.env</code> (secrets), <code>venv/</code> and Python caches (<code>__pycache__/</code>) from the Git repo. Has no effect at runtime, only at commit time.</td>
         </tr>
       </tbody>
     </table>
 
-    <h3>Pages statiques (pages/)</h3>
-    <p style="color: var(--muted); font-size: 13.5px; margin-top: -4px;">Servies telles quelles par <code>app.py</code> (route <code>/pages/&lt;fichier&gt;</code>, sans templating) pour ne jamais casser leur propre HTML/CSS ; elles apparaissent automatiquement dans la liste <code>/pages</code> des qu'un fichier <code>.html</code> est depose dans ce dossier.</p>
+    <h3>Static pages (pages/)</h3>
+    <p style="color: var(--muted); font-size: 13.5px; margin-top: -4px;">Served as-is by <code>app.py</code> (route <code>/pages/&lt;file&gt;</code>, no templating) so their own HTML/CSS never breaks; they automatically appear in the <code>/pages</code> listing as soon as an <code>.html</code> file is dropped into this folder.</p>
     <table>
       <thead>
-        <tr><th>Fichier</th><th>Role</th></tr>
+        <tr><th>File</th><th>Role</th></tr>
       </thead>
       <tbody>
         <tr>
           <td class="file">protocole_controle.html</td>
-          <td>Reference vivante du protocole de commande du robot (trames NMEA proprietaires <code>$PROV,...</code>) : types de trames, exemples, checksum. Mise a jour a chaque evolution du protocole cote <code>link/server.py</code> du depot robot.</td>
+          <td>Living reference for the robot's command protocol (proprietary NMEA <code>$PROV,...</code> frames): frame types, examples, checksum. Updated with every change to the protocol on the <code>link/server.py</code> side of the robot repo.</td>
         </tr>
         <tr>
           <td class="file">rapport_rover_dgps.html</td>
-          <td>Rapport de projet autonome (schemas reseau des deux sites, organisation du code robot, pipeline DGPS/PID/PWM, courbes de reglage PID). Genere a un instant donne, pas mis a jour automatiquement avec le reste du code.</td>
+          <td>Standalone project report (network diagrams for both sites, robot code organization, DGPS/PID/PWM pipeline, PID tuning curves). Generated at a given point in time, not automatically kept in sync with the rest of the code.</td>
         </tr>
         <tr>
           <td class="file">architecture_webserver.html</td>
-          <td>Cette page &mdash; schema des dependances et role de chaque fichier de <code>robot-webserver</code>. A completer a chaque fichier ajoute ou retire du depot.</td>
+          <td>This page &mdash; dependency diagram and role of each file in <code>robot-webserver</code>. To be updated whenever a file is added to or removed from the repo.</td>
         </tr>
       </tbody>
     </table>
 
-    <h3>Contenus multimedia (media/)</h3>
+    <h3>Media content (media/)</h3>
     <table>
       <thead>
-        <tr><th>Dossier</th><th>Role</th></tr>
+        <tr><th>Folder</th><th>Role</th></tr>
       </thead>
       <tbody>
         <tr>
           <td class="file">media/videos/</td>
-          <td>Videos (<code>.mp4</code>/<code>.webm</code>/<code>.ogg</code>/<code>.mov</code>) jouees en boucle une a la fois dans le panneau "Video feed" de <code>/control</code>, uniquement quand le flux camera en direct n'est pas disponible. Vide par defaut (juste un <code>.gitkeep</code>) &mdash; affiche alors un emplacement "coming soon".</td>
+          <td>Videos (<code>.mp4</code>/<code>.webm</code>/<code>.ogg</code>/<code>.mov</code>) played one at a time in a loop in the "Video feed" panel of <code>/control</code>, only when the live camera stream is unavailable. Empty by default (just a <code>.gitkeep</code>) &mdash; shows a "coming soon" placeholder in that case.</td>
         </tr>
         <tr>
           <td class="file">media/images/</td>
-          <td>Images (<code>.jpg</code>/<code>.jpeg</code>/<code>.png</code>/<code>.gif</code>/<code>.webp</code>) affichees en diaporama (3s par image) dans le panneau "Images" de <code>/control</code>. Sans rapport avec les snapshots <code>CAM,SNAP</code> du robot (voir <a href="/pages/protocole_controle.html">page protocole</a>) qui, eux, restent sur la Pi n1 dans <code>camera/tmp/</code> &mdash; ce dossier-ci est une galerie manuelle, deposee a la main.</td>
+          <td>Images (<code>.jpg</code>/<code>.jpeg</code>/<code>.png</code>/<code>.gif</code>/<code>.webp</code>) shown as a slideshow (3s per image) in the "Images" panel of <code>/control</code>. Unrelated to the robot's <code>CAM,SNAP</code> snapshots (see <a href="/pages/protocole_controle.html">the protocol page</a>), which stay on Pi #1 in <code>camera/tmp/</code> &mdash; this folder is a manual gallery, populated by hand.</td>
         </tr>
       </tbody>
     </table>
   </section>
 
   <footer>
-    Robot mobile d'exterieur &mdash; page maintenue a la main, en parallele du code du site.
+    Outdoor mobile robot &mdash; page maintained by hand, alongside the site's code.
   </footer>
 
 </div>

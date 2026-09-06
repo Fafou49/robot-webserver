@@ -4,7 +4,9 @@ Petit serveur Flask, sans interface graphique, qui affiche les pages HTML du
 projet sur le réseau local (rapport réseau/code, protocole de contrôle...)
 et relaie les commandes tapées dans la console de `/control` vers le robot
 (Raspberry Pi n°1). L'accès est protégé par un login (identifiant + mot de
-passe), voir "Configurer le login" ci-dessous.
+passe), voir "Configurer le login" ci-dessous. Ce README est en français
+pour toi, mais le site lui-même (login, `/control`, et toutes les pages de
+`pages/`) est entièrement en anglais.
 
 ## Structure
 
@@ -55,6 +57,32 @@ python3 generate_password.py
 colle-la dans `.env`, à la place de la ligne `WEBSERVER_PASSWORD_HASH=` vide.
 Choisis aussi ton identifiant dans `WEBSERVER_USERNAME` (par défaut
 `fabrice`).
+
+### Compte "invité" (accès en lecture seule, optionnel)
+
+En plus de ton compte principal, tu peux configurer un second identifiant
+donnant un accès restreint à `/control` — pratique pour partager le suivi
+du robot (position, vitesse...) avec quelqu'un sans lui laisser la
+possibilité de le piloter à distance (utile notamment si le site est un
+jour exposé sur internet, pas seulement sur ton WiFi local).
+
+```bash
+# genere le hash du mot de passe invité (meme outil que ci-dessus)
+python3 generate_password.py
+```
+
+Colle le hash obtenu dans `WEBSERVER_VIEWER_PASSWORD_HASH`, et choisis un
+identifiant dans `WEBSERVER_VIEWER_USERNAME` (les deux sont vides par
+défaut, ce qui désactive complètement ce compte). Une fois connecté avec
+ces identifiants, l'invité voit le bandeau d'état (position, vitesse...)
+se mettre à jour normalement, mais :
+
+- le panneau **Controls** n'affiche aucun bouton de commande ;
+- le champ de saisie de la console est désactivé (grisé, non cliquable) ;
+- même en contournant l'interface (appel direct à `/api/send`), le serveur
+  refuse toute commande autre que `STA` (celle qui alimente le bandeau
+  d'état) pour ce compte — ce n'est donc pas qu'un masquage côté
+  affichage, c'est une vraie restriction côté serveur.
 
 Optionnel mais recommandé (sinon tout le monde est déconnecté à chaque
 redémarrage du serveur) : génère une clé de session fixe et colle-la dans

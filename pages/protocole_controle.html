@@ -1,9 +1,9 @@
 <!doctype html>
-<html lang="fr">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Protocole de controle du robot</title>
+<title>Robot Control Protocol</title>
 <style>
   :root {
     --bg: #f7f5f0;
@@ -168,53 +168,53 @@
 <div class="wrap">
 
   <header>
-    <a class="back-link" href="/control">&larr; Retour a la page de controle</a>
-    <div class="status">Transport implemente (socket TCP) &mdash; complete au fur et a mesure</div>
-    <h1>Protocole de controle du robot</h1>
-    <p class="subtitle">Format des messages echanges entre le site web (Raspberry Pi n2) et le robot (Raspberry Pi n1). Cette page est mise a jour a chaque nouvelle commande definie.</p>
+    <a class="back-link" href="/control">&larr; Back to the control page</a>
+    <div class="status">Transport implemented (TCP socket) &mdash; completed incrementally</div>
+    <h1>Robot Control Protocol</h1>
+    <p class="subtitle">Format of the messages exchanged between the website (Raspberry Pi #2) and the robot (Raspberry Pi #1). This page is updated whenever a new command is defined.</p>
   </header>
 
   <section>
-    <h2>Pourquoi un protocole inspire de NMEA&nbsp;?</h2>
+    <h2>Why an NMEA-inspired protocol?</h2>
     <p>
-      Le projet utilise deja NMEA 0183 pour lire le GPS (<code>gps_parse.py</code>), donc reprendre le meme style de trame pour le controle du robot garde une seule logique de lecture/ecriture dans tout le code plutot que d'en introduire une deuxieme. Une trame ASCII lisible se lit directement dans la console du site (voir la page <code>/control</code>) sans outil de decodage, ce qui aide beaucoup pour deboguer sur le terrain. Le format virgule-separee est trivial a parser (<code>split(",")</code>), et la somme de controle (checksum) donne une verification simple de l'integrite sur une liaison WiFi qui peut etre bruitee.
+      The project already uses NMEA 0183 to read the GPS (<code>gps_parse.py</code>), so reusing the same sentence style for robot control keeps a single read/write logic throughout the codebase instead of introducing a second one. A readable ASCII sentence can be read directly in the site's console (see the <code>/control</code> page) without any decoding tool, which helps a lot when debugging in the field. The comma-separated format is trivial to parse (<code>split(",")</code>), and the checksum provides a simple integrity check over a WiFi link that can be noisy.
     </p>
     <p>
-      Point d'attention&nbsp;: NMEA a ete concu a l'origine pour de la diffusion a sens unique (un capteur qui emet), pas pour du dialogue commande/reponse. La solution standard est d'utiliser les trames <em>proprietaires</em> NMEA (prefixe <code>P</code> + code sur 3 lettres) et d'y definir soi-meme des types de trames de commande, d'accuse de reception et d'erreur &mdash; c'est l'approche prise ci-dessous.
+      Point of caution&nbsp;: NMEA was originally designed for one-way broadcasting (a sensor transmitting), not for command/response dialogue. The standard solution is to use <em>proprietary</em> NMEA sentences (<code>P</code> prefix + 3-letter code) and define your own command, acknowledgment, and error sentence types within them &mdash; this is the approach taken below.
     </p>
   </section>
 
   <section>
-    <h2>Transport&nbsp;: socket TCP</h2>
+    <h2>Transport&nbsp;: TCP socket</h2>
     <p>
-      Les trames circulent sur une connexion TCP simple entre les deux cartes (module <code>socket</code> standard de Python, aucune dependance externe) &mdash; choisi plutot que MQTT (broker en plus a gerer, dispreportionne pour 2 noeuds) ou HTTP classique (moins adapte a de la telemetrie continue). Le robot (Pi n1) fait tourner un serveur TCP (<code>link/server.py</code> dans le depot robot, port <code>5050</code> par defaut) qui accepte une trame par ligne et repond par une trame <code>ACK</code>/<code>ERR</code>/<code>STA</code>. Le site (Pi n2) ouvre une connexion, envoie, lit une ligne de reponse, ferme &mdash; suffisant pour des commandes tapees a la main dans la console de <code>/control</code>.
+      Frames travel over a simple TCP connection between the two boards (Python's standard <code>socket</code> module, no external dependency) &mdash; chosen over MQTT (an extra broker to manage, overkill for 2 nodes) or plain HTTP (less suited to continuous telemetry). The robot (Pi #1) runs a TCP server (<code>link/server.py</code> in the robot repo, port <code>5050</code> by default) that accepts one frame per line and replies with an <code>ACK</code>/<code>ERR</code>/<code>STA</code> frame. The site (Pi #2) opens a connection, sends, reads one response line, closes &mdash; enough for commands typed by hand in the <code>/control</code> console.
     </p>
-    <p class="mono" style="color: var(--muted); font-style: italic;">Etat actuel&nbsp;: STP et DRV mettent a jour un etat en memoire et repondent correctement (ACK/ERR), mais ne pilotent pas encore les moteurs reels &mdash; motor_control/pwm.py est aujourd'hui un script bloquant qui ouvre le GPIO au demarrage, pas une fonction appelable ; le brancher pour de vrai est la prochaine etape. NAV et PID enregistrent la valeur recue (ACK) sans encore agir dessus (pas de lien avec le pipeline GPS/PID pour l'instant). CAM,SNAP appelle pour de vrai la route GET /snap de camera/stream_server.py (en HTTP local, processus separe) et repond ACK/ERR selon le resultat ; CAM,REC_START et CAM,REC_STOP repondent toujours ERR (enregistrement video non implemente). Dans la reponse STA, la position <em>courante</em> et cap/speed sont lus pour de vrai depuis un recepteur GPS serie (link/gps_reader.py, non teste sur un vrai recepteur &mdash; pynmea2/pyserial non installables dans l'environnement ou ce module a ete ecrit) et restent a 0 tant qu'aucun recepteur n'est branche ; la position <em>cible</em> (target_lat/target_lon), elle, reflete bien la derniere trame NAV recue.</p>
+    <p class="mono" style="color: var(--muted); font-style: italic;">Current status&nbsp;: STP and DRV update an in-memory state and respond correctly (ACK/ERR), but do not yet drive the real motors &mdash; motor_control/pwm.py is currently a blocking script that opens the GPIO at startup, not a callable function; actually wiring it up for real is the next step. NAV and PID record the received value (ACK) without acting on it yet (no link to the GPS/PID pipeline for now). RTE genuinely stores the waypoint list and genuinely advances target_lat/target_lon to the next one as the live GPS fix reaches each one in turn (same real logic as NAV's target, just chained automatically) &mdash; but, same caveat as NAV, nothing yet steers the motors to actually follow it. CAM,SNAP genuinely calls the GET /snap route of camera/stream_server.py (over local HTTP, separate process) and responds ACK/ERR depending on the result; CAM,REC_START and CAM,REC_STOP always respond ERR (video recording not implemented). In the STA response, the <em>current</em> position and cap/speed are genuinely read from a serial GPS receiver (link/gps_reader.py, untested on a real receiver &mdash; pynmea2/pyserial could not be installed in the environment where this module was written) and stay at 0 as long as no receiver is connected; the <em>target</em> position (target_lat/target_lon), however, does reflect the last NAV frame received, or the current waypoint of an active RTE route.</p>
   </section>
 
   <section>
-    <h2>Format general d'une trame</h2>
-    <div class="sentence-diagram">$<span class="lbl">PROV</span>,<span class="lbl">TYPE</span>,champ1,champ2,...*<span class="lbl">hh</span>&lt;CR&gt;&lt;LF&gt;</div>
+    <h2>General sentence format</h2>
+    <div class="sentence-diagram">$<span class="lbl">PROV</span>,<span class="lbl">TYPE</span>,field1,field2,...*<span class="lbl">hh</span>&lt;CR&gt;&lt;LF&gt;</div>
     <ul class="notes">
-      <li><code>$PROV</code> &mdash; prefixe fixe (<code>P</code> = trame proprietaire NMEA, <code>ROV</code> = code du projet, 3 lettres).</li>
-      <li><code>TYPE</code> &mdash; identifiant de la trame sur 3 lettres (<code>DRV</code>, <code>NAV</code>, <code>STP</code>...), voir le tableau ci-dessous.</li>
-      <li>champs suivants separes par des virgules, specifiques a chaque type de trame.</li>
-      <li><code>*hh</code> &mdash; checksum sur 2 caracteres hexadecimaux majuscules, XOR de tous les octets entre <code>$</code> et <code>*</code> (calcul identique a celui des trames NMEA standard).</li>
-      <li>Regle d'evolution&nbsp;: ajouter des champs seulement en fin de trame (jamais au milieu), pour qu'un ancien parseur ignore simplement les champs en trop plutot que de planter.</li>
+      <li><code>$PROV</code> &mdash; fixed prefix (<code>P</code> = NMEA proprietary sentence, <code>ROV</code> = project code, 3 letters).</li>
+      <li><code>TYPE</code> &mdash; 3-letter sentence identifier (<code>DRV</code>, <code>NAV</code>, <code>STP</code>...), see the table below.</li>
+      <li>subsequent fields, comma-separated, specific to each sentence type.</li>
+      <li><code>*hh</code> &mdash; 2-character uppercase hexadecimal checksum, XOR of all bytes between <code>$</code> and <code>*</code> (same calculation as standard NMEA sentences).</li>
+      <li>Evolution rule&nbsp;: only add fields at the end of a sentence (never in the middle), so that an older parser simply ignores the extra fields instead of crashing.</li>
     </ul>
   </section>
 
   <section>
-    <h2>Trames definies</h2>
+    <h2>Defined sentences</h2>
     <table>
-      <caption>REQ = site &rarr; robot (commande) &nbsp;&bull;&nbsp; RES = robot &rarr; site (reponse/telemetrie)</caption>
+      <caption>REQ = site &rarr; robot (command) &nbsp;&bull;&nbsp; RES = robot &rarr; site (response/telemetry)</caption>
       <thead>
         <tr>
           <th>Type</th>
-          <th>Sens</th>
-          <th>Champs</th>
+          <th>Direction</th>
+          <th>Fields</th>
           <th>Description</th>
-          <th>Exemple</th>
+          <th>Example</th>
         </tr>
       </thead>
       <tbody>
@@ -222,87 +222,94 @@
           <td><code>STP</code></td>
           <td><span class="dir req">REQ</span></td>
           <td>&mdash;</td>
-          <td>Arret d'urgence, priorite maximale : PWM des deux moteurs a 0 immediatement.</td>
+          <td>Emergency stop, highest priority: PWM of both motors set to 0 immediately.</td>
           <td class="example">$PROV,STP*60</td>
         </tr>
         <tr>
           <td><code>DRV</code></td>
           <td><span class="dir req">REQ</span></td>
           <td>left_pwm, right_pwm</td>
-          <td>Pilotage manuel direct, court-circuite le PID. Valeurs PWM entre -255 et 255.</td>
+          <td>Direct manual control, bypasses the PID. PWM values between -255 and 255.</td>
           <td class="example">$PROV,DRV,120,120*77</td>
         </tr>
         <tr>
           <td><code>NAV</code></td>
           <td><span class="dir req">REQ</span></td>
           <td>lat, N/S, lon, E/W</td>
-          <td>Definit un point GPS a atteindre en autonome (le robot utilise ses PID distance/angle existants). Format lat/lon identique aux trames GPGGA.</td>
+          <td>Sets a single GPS waypoint to reach autonomously (the robot uses its existing distance/angle PID loops). lat/lon format identical to GPGGA sentences. Cancels any route in progress (see <code>RTE</code> below) &mdash; a manual <code>NAV</code> takes back control.</td>
           <td class="example">$PROV,NAV,4807.038,N,01131.000,E*57</td>
+        </tr>
+        <tr>
+          <td><code>RTE</code></td>
+          <td><span class="dir req">REQ</span></td>
+          <td>count, then count &times; (lat, N/S, lon, E/W)</td>
+          <td>Sets an ordered list of GPS waypoints to follow automatically, one at a time &mdash; same per-point format as <code>NAV</code>, repeated <code>count</code> times. The robot heads for the first waypoint; once the live GPS fix is within <code>ROUTE_ARRIVAL_RADIUS_M</code> of it (5&nbsp;m by default, overridable via that environment variable on Pi&nbsp;#1), it automatically advances to the next, and so on until the last one is reached. Replaces any previous route; a plain <code>NAV</code> or <code>STP</code> also cancels an active route. On <code>/control</code>, the &quot;GPS route&quot; button opens a file picker instead of prefilling the console &mdash; pick a plain text file with one point per line as <code>lat,lon</code> in decimal degrees (blank lines and lines starting with <code>#</code> are ignored), and the site converts it to this sentence and sends it. Capped at 200 waypoints per route.</td>
+          <td class="example">$PROV,RTE,2,4723.492,N,00044.340,W,4723.532,N,00044.292,W*6F</td>
         </tr>
         <tr>
           <td><code>MOD</code></td>
           <td><span class="dir req">REQ</span></td>
           <td>AUTO | MANUAL | IDLE</td>
-          <td>Change le mode de fonctionnement : suivi GPS autonome, pilotage manuel (DRV), ou arret au repos.</td>
+          <td>Changes the operating mode: autonomous GPS tracking, manual control (DRV), or idle stop.</td>
           <td class="example">$PROV,MOD,MANUAL*47</td>
         </tr>
         <tr>
           <td><code>PID</code></td>
           <td><span class="dir req">REQ</span></td>
           <td>D|A, kp, ki, kd</td>
-          <td>Met a jour a chaud les coefficients PID de la boucle Distance (D) ou Angle (A), sans redeployer le code.</td>
+          <td>Updates the PID coefficients of the Distance (D) or Angle (A) loop on the fly, without redeploying the code.</td>
           <td class="example">$PROV,PID,D,1.0,0.0,0.5*04</td>
         </tr>
         <tr>
           <td><code>CAM</code></td>
           <td><span class="dir req">REQ</span></td>
           <td>SNAP | REC_START | REC_STOP</td>
-          <td>Commande la camera embarquee. <code>SNAP</code> : le robot (Pi n1) sauvegarde l'image courante dans un dossier tampon local (<code>camera/tmp/</code>, jamais plus de 5 fichiers &mdash; le plus ancien est supprime des qu'un 6e arrive), pour un traitement ulterieur ; independant de <code>media/images/</code> sur le site, qui reste la galerie de photos statiques. <code>REC_START</code>/<code>REC_STOP</code> : toujours <code>ERR</code> pour l'instant (voir note ci-dessus). Le declenchement passe par une requete HTTP locale vers <code>camera/stream_server.py</code> (processus separe), independamment du flux video en direct de <code>/control</code>, qui utilise sa propre connexion HTTP.</td>
+          <td>Controls the onboard camera. <code>SNAP</code>: the robot (Pi #1) saves the current image to a local buffer folder (<code>camera/tmp/</code>, never more than 5 files &mdash; the oldest is deleted as soon as a 6th arrives), for later processing; independent of <code>media/images/</code> on the site, which remains the static photo gallery. <code>REC_START</code>/<code>REC_STOP</code>: always <code>ERR</code> for now (see note above). The trigger goes through a local HTTP request to <code>camera/stream_server.py</code> (separate process), independent of the live video stream on <code>/control</code>, which uses its own HTTP connection.</td>
           <td class="example">$PROV,CAM,SNAP*58</td>
         </tr>
         <tr>
           <td><code>STA</code></td>
           <td><span class="dir res">RES</span></td>
-          <td>lat, lat_dir, lon, lon_dir, cap, speed, left_pwm, right_pwm, batterie, mode, target_lat, target_lat_dir, target_lon, target_lon_dir</td>
-          <td>Reponse a une requete <code>$PROV,STA*hh</code> (sans champs) : telemetrie et etat courants, affiches dans le bandeau de statut et la console de <code>/control</code>. Position <em>courante</em> (<code>lat/lat_dir/lon/lon_dir</code>) et position <em>cible</em> (<code>target_lat/target_lat_dir/target_lon/target_lon_dir</code>, derniere trame <code>NAV</code> recue) utilisent le meme format groupe que <code>NAV</code> : valeur puis hemisphere cote a cote. <em>Champs reordonnes le 2026-09-02</em> (rupture assumee du format precedent, rien ne s'appuyait encore dessus) pour corriger un vrai bug : les deux champs de position courante n'avaient pas d'hemisphere au depart, le site supposait donc N/E par defaut &mdash; a tort, ce robot opere a l'ouest du meridien. <code>lat/lon/cap/speed</code> sont lus depuis un recepteur GPS serie par <code>link/gps_reader.py</code> (trames GPRMC/GGA via <code>pynmea2</code>, meme materiel que <code>gps/gps_transfer.py</code>) et restent a leur valeur de repli 0.0 tant qu'aucun recepteur n'est branche ou qu'aucune trame valide n'a ete recue. <code>speed</code> est en km/h, <code>cap</code> en degres (cap sur le sol, vient de GPRMC). <code>batterie</code> reste a 0, aucun capteur de batterie dans le projet a ce jour.</td>
+          <td>lat, lat_dir, lon, lon_dir, cap, speed, left_pwm, right_pwm, battery, mode, target_lat, target_lat_dir, target_lon, target_lon_dir</td>
+          <td>Response to a <code>$PROV,STA*hh</code> request (no fields): current telemetry and state, displayed in the status banner and the <code>/control</code> console. <em>Current</em> position (<code>lat/lat_dir/lon/lon_dir</code>) and <em>target</em> position (<code>target_lat/target_lat_dir/target_lon/target_lon_dir</code>, last <code>NAV</code> frame received) use the same grouped format as <code>NAV</code>: value followed by hemisphere, side by side. <em>Fields reordered on 2026-09-02</em> (a deliberate break from the previous format, since nothing relied on it yet) to fix a real bug: the two current-position fields originally had no hemisphere, so the site defaulted to assuming N/E &mdash; wrongly, since this robot operates west of the meridian. <code>lat/lon/cap/speed</code> are read from a serial GPS receiver by <code>link/gps_reader.py</code> (GPRMC/GGA sentences via <code>pynmea2</code>, same hardware as <code>gps/gps_transfer.py</code>) and stay at their fallback value of 0.0 as long as no receiver is connected or no valid sentence has been received. <code>speed</code> is in km/h, <code>cap</code> in degrees (course over ground, from GPRMC). <code>battery</code> stays at 0, there is no battery sensor in the project as of now.</td>
           <td class="example">$PROV,STA,4723.462,N,00044.310,W,284.5,3.7,110,108,74,IDLE,4723.492,N,00044.340,W*7A</td>
         </tr>
         <tr>
           <td><code>ACK</code></td>
           <td><span class="dir res">RES</span></td>
           <td>type_commande</td>
-          <td>Accuse de reception d'une commande recue et acceptee.</td>
+          <td>Acknowledgment of a command received and accepted.</td>
           <td class="example">$PROV,ACK,DRV*12</td>
         </tr>
         <tr>
           <td><code>ERR</code></td>
           <td><span class="dir res">RES</span></td>
           <td>code, message</td>
-          <td>Commande refusee ou erreur d'execution (ex&nbsp;: checksum invalide, valeur hors limites).</td>
+          <td>Command rejected or execution error (e.g.&nbsp;: invalid checksum, out-of-range value).</td>
           <td class="example">$PROV,ERR,02,PWM_OUT_OF_RANGE*7D</td>
         </tr>
         <tr class="todo-row">
-          <td colspan="5">A definir plus tard : gestion de plusieurs waypoints en file d'attente, retour de l'etat de la connexion DGPS/RTK, code d'authentification des trames si le reseau devient moins fiable.</td>
+          <td colspan="5">To be defined later: reporting DGPS/RTK connection status, frame authentication code if the network becomes less reliable.</td>
         </tr>
       </tbody>
     </table>
   </section>
 
   <section>
-    <h2>Calcul du checksum</h2>
-    <p>XOR de chaque caractere entre <code>$</code> et <code>*</code>, exclus, exprime en hexadecimal majuscule sur 2 caracteres (complete par un zero si necessaire) :</p>
+    <h2>Checksum calculation</h2>
+    <p>XOR of each character between <code>$</code> and <code>*</code>, exclusive, expressed as 2-character uppercase hexadecimal (zero-padded if necessary):</p>
     <div class="sentence-diagram">def nmea_checksum(sentence_body: str) -> str:
     checksum = 0
     for ch in sentence_body:
         checksum ^= ord(ch)
     return f"{checksum:02X}"
 
-# sentence_body = tout ce qui est entre $ et * (sans les inclure)
-# ex: nmea_checksum("PROV,STP") -> "60"</div>
+# sentence_body = everything between $ and * (exclusive)
+# e.g.: nmea_checksum("PROV,STP") -> "60"</div>
   </section>
 
   <footer>
-    Robot mobile d'exterieur &mdash; page maintenue a la main, en parallele du code cote robot et cote site.
+    Outdoor mobile robot &mdash; page maintained by hand, alongside the robot-side and site-side code.
   </footer>
 
 </div>
