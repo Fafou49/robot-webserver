@@ -292,6 +292,57 @@
   </section>
 
   <section>
+    <h2>Robot-side motor/gamepad architecture (Pi #1, for context)</h2>
+    <p>The "GPS route" button on <a href="/control">/control</a> sends an <code>RTE</code> frame to Pi #1 (see <a href="/pages/protocole_controle.html">the protocol page</a>). The <code>robot</code> repo is documented separately, but since this diagram explains what actually happens once that frame (or any other command) arrives there, it's kept here for context. Full detail &mdash; including the honesty notes on what's real versus not-yet-implemented &mdash; lives in that repo's own README, section "Pilotage moteur et manette".</p>
+
+    <div class="diagram">
+      <div class="diagram-zone">
+        <div class="diagram-zone-label">Raspberry Pi #1 &mdash; "robot" repo, single Python process (<code>python3 -m link</code>)</div>
+
+        <div class="diagram-row">
+          <span class="node ext">robot-webserver (Pi #2, this repo)</span>
+          <span class="arrow">&mdash;TCP :5050&rarr;</span>
+          <span class="node">ControlServer <span class="mono">(link/server.py)</span></span>
+        </div>
+        <div class="diagram-row">
+          <span class="node ext">Xbox controller</span>
+          <span class="arrow">&mdash;evdev events&rarr;</span>
+          <span class="node">GamepadReader <span class="mono">(link/gamepad_handler.py)</span></span>
+        </div>
+        <div class="diagram-row">
+          <span class="node ext">GPS receiver</span>
+          <span class="arrow">&mdash;NMEA&rarr;</span>
+          <span class="node">GPSReader <span class="mono">(link/gps_reader.py)</span></span>
+        </div>
+
+        <div class="diagram-row indent">
+          <span class="arrow">&darr; all three read/write the same shared state</span>
+        </div>
+        <div class="diagram-row">
+          <span class="node main">RobotState (shared)</span>
+        </div>
+        <div class="diagram-row indent">
+          <span class="arrow">&harr; every GPS fix, while in AUTO mode</span>
+        </div>
+        <div class="diagram-row">
+          <span class="node">Autopilot <span class="mono">(link/autopilot.py)</span></span>
+          <span class="arrow" style="font-size: 12px;">distance+heading &rarr; 2&times;PID &rarr; PWM</span>
+        </div>
+        <div class="diagram-row indent">
+          <span class="arrow">&darr;</span>
+        </div>
+        <div class="diagram-row">
+          <span class="node">MotorDriver <span class="mono">(motor_control/motor_driver.py)</span></span>
+          <span class="arrow">&rarr;</span>
+          <span class="node ext">Motor GPIO</span>
+        </div>
+      </div>
+    </div>
+
+    <p style="color: var(--muted); font-size: 13.5px;">Since 2026-09-07, sending an <code>RTE</code> route and arming <code>AUTO</code> mode (<code>MOD,AUTO</code> from the console, or the controller's <code>A</code> button) really drives the robot: on every GPS fix, <code>link/autopilot.py</code> computes the heading/distance error to the current waypoint and feeds it through two PID loops to produce a motor command, advancing to the next point on arrival. Pressing <code>B</code> (or <code>START</code>) stops the robot, same as <code>STP</code>; touching a joystick always hands control back to manual immediately, mid-route or not. Known limitation, not hidden: there's no compass/IMU on this robot &mdash; the only heading source is the GPS receiver's own course-over-ground, which is only meaningful while actually moving, and the PID gains are only validated in offline simulation so far. <code>DRV</code> from the console, or the controller's sticks, still drive manually the same way as before.</p>
+  </section>
+
+  <section>
     <h2>Application files</h2>
 
     <h3>Site core (repo root)</h3>
