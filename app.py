@@ -105,7 +105,26 @@ def _list_media(directory, extensions):
 
 
 def _page(title, body):
-    """Small shared page shell, same look as the rest of the site."""
+    """Small shared page shell, used by /pages (listing + its 500 fallback).
+    Background image + link color added 2026-09-09: the tech-stack graphic
+    (static/tech_stack.png, HTML/CSS/JS/Python/Raspberry Pi around Claude)
+    as a fixed page background, links in the same blue (#58a6ff) as the
+    circle around Claude in that image -- also /control's existing accent
+    color, so it stays visually consistent with the rest of the site.
+
+    background-size: contain (not cover) so the whole image is always
+    visible on a standard screen, never cropped -- the tradeoff is empty
+    space on the sides (image is square, most screens aren't). That empty
+    space is covered by background-color below, set to the exact same
+    #0d1117 the image itself was generated with as its own background, so
+    the letterboxing blends into the image instead of showing as a
+    visibly different-colored border. If tech_stack.png is ever replaced
+    with an image using a different background color, update this
+    background-color to match, or the seam will show again.
+
+    The content sits in a translucent dark panel so it stays readable no
+    matter which part of the image ends up behind it at a given viewport
+    size."""
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -113,21 +132,45 @@ def _page(title, body):
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{title}</title>
   <style>
-    body {{ font-family: system-ui, sans-serif; max-width: 420px; margin: 80px auto; padding: 0 20px; color: #1a1a1a; }}
+    html, body {{ height: 100%; }}
+    body {{
+      font-family: system-ui, sans-serif;
+      color: #e6edf3;
+      margin: 0;
+      min-height: 100vh;
+      background-image: url('/static/tech_stack.png');
+      background-size: contain;
+      background-position: center;
+      background-repeat: no-repeat;
+      background-attachment: fixed;
+      background-color: #0d1117;
+    }}
+    .panel {{
+      max-width: 420px;
+      margin: 80px auto;
+      padding: 24px 28px;
+      background: rgba(13, 17, 23, 0.78);
+      border: 1px solid #30363d;
+      border-radius: 12px;
+      backdrop-filter: blur(3px);
+    }}
     h1 {{ font-size: 20px; margin-bottom: 24px; }}
-    label {{ display: block; font-size: 13px; margin: 14px 0 4px; color: #444; }}
-    input {{ width: 100%; box-sizing: border-box; padding: 9px 10px; font-size: 15px; border: 1px solid #ccc; border-radius: 6px; }}
+    label {{ display: block; font-size: 13px; margin: 14px 0 4px; color: #c9d1d9; }}
+    input {{ width: 100%; box-sizing: border-box; padding: 9px 10px; font-size: 15px; border: 1px solid #30363d; border-radius: 6px; background: #0d1117; color: #e6edf3; }}
     button {{ margin-top: 20px; padding: 9px 16px; font-size: 15px; border: none; border-radius: 6px; background: #1a56db; color: white; cursor: pointer; }}
     button:hover {{ background: #1544ab; }}
     .error {{ background: #fdecea; color: #a12622; padding: 10px 12px; border-radius: 6px; font-size: 14px; margin-top: 16px; }}
     li {{ margin: 8px 0; }}
-    a {{ font-size: 16px; }}
+    a {{ font-size: 16px; color: #58a6ff; text-decoration: none; }}
+    a:hover {{ text-decoration: underline; }}
     .top {{ display: flex; justify-content: space-between; align-items: baseline; }}
-    .logout {{ font-size: 13px; color: #666; }}
+    .logout {{ font-size: 13px; color: #8b949e; }}
   </style>
 </head>
 <body>
+<div class="panel">
 {body}
+</div>
 </body>
 </html>"""
 
@@ -640,6 +683,70 @@ def _control_page(videos=None, images=None, role="admin"):
     }}
     .cmd-button:hover {{ background: #21262d; border-color: #58a6ff; }}
     .cmd-button:active {{ background: #1c2129; }}
+    /* STOP: the one emergency, direct-send button (see commandButtons
+       below) -- visually set apart from the fill-then-Enter buttons so
+       it reads as "press this and it's already sent", not "press this to
+       start typing". */
+    .cmd-button-danger {{
+      background: #2d1214;
+      border-color: #f85149;
+      color: #ffb3ac;
+      font-weight: 600;
+      text-align: center;
+    }}
+    .cmd-button-danger:hover {{ background: #3d181b; border-color: #ff7b72; }}
+    .cmd-button-danger:active {{ background: #24100f; }}
+
+    /* "Distance + angle" (2026-09-12): a small inline form that drops
+       down under its button instead of prefilling the console -- the two
+       numbers it needs (distance, angle) don't fit the "prefix + type the
+       rest" pattern the other buttons use, and unlike GPS Driving's file
+       picker there's no native browser widget for this input. Hidden
+       until its button is clicked (see the "open" class below). */
+    .cmd-distance-panel {{
+      display: none;
+      flex-direction: column;
+      gap: 6px;
+      padding: 10px 12px;
+      margin-top: -4px;
+      background: #0d1117;
+      border: 1px solid #30363d;
+      border-top: none;
+      border-radius: 0 0 6px 6px;
+      font-family: "Courier New", monospace;
+      font-size: 12.5px;
+    }}
+    .cmd-distance-panel.open {{ display: flex; }}
+    .cmd-distance-panel label {{
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      color: #8b949e;
+    }}
+    .cmd-distance-panel input[type="number"] {{
+      width: 90px;
+      background: #161b22;
+      border: 1px solid #30363d;
+      border-radius: 4px;
+      color: #e6edf3;
+      font-family: inherit;
+      font-size: inherit;
+      padding: 4px 6px;
+    }}
+    .cmd-distance-panel button {{
+      margin-top: 2px;
+      padding: 6px 10px;
+      background: #1f6feb;
+      border: 1px solid #388bfd;
+      border-radius: 6px;
+      color: #e6edf3;
+      font-family: inherit;
+      font-size: inherit;
+      font-weight: 600;
+      cursor: pointer;
+    }}
+    .cmd-distance-panel button:hover {{ background: #388bfd; }}
 
     .console-input {{
       display: flex;
@@ -919,6 +1026,37 @@ def _control_page(videos=None, images=None, role="admin"):
       return (toDeg(Math.atan2(y, x)) + 360) % 360;
     }}
 
+    // Inverse of haversineMeters/bearingDegrees above: given a starting
+    // point, a distance in meters and a bearing in degrees (0 = North,
+    // clockwise), returns the [lat, lon] destination point -- the direct
+    // ("forward") geodesic problem, same spherical-Earth model (R) as
+    // haversineMeters so the two stay consistent with each other. Used by
+    // the "Distance + angle" button to turn "go 12 m at bearing 40°" into
+    // an actual GPS point to send as NAV.
+    function destinationPoint(lat, lon, distanceMeters, bearingDeg) {{
+      const R = 6371000;
+      const toRad = (d) => (d * Math.PI) / 180;
+      const toDeg = (r) => (r * 180) / Math.PI;
+      const delta = distanceMeters / R;
+      const theta = toRad(bearingDeg);
+      const phi1 = toRad(lat);
+      const lambda1 = toRad(lon);
+
+      const phi2 = Math.asin(
+        Math.sin(phi1) * Math.cos(delta) + Math.cos(phi1) * Math.sin(delta) * Math.cos(theta)
+      );
+      const lambda2 =
+        lambda1 +
+        Math.atan2(
+          Math.sin(theta) * Math.sin(delta) * Math.cos(phi1),
+          Math.cos(delta) - Math.sin(phi1) * Math.sin(phi2)
+        );
+
+      // Normalize longitude back into [-180, 180) -- only matters for a
+      // destination point near the antimeridian, but cheap to always do.
+      return [toDeg(phi2), ((toDeg(lambda2) + 540) % 360) - 180];
+    }}
+
     function formatLatLon(lat, lon) {{
       return lat.toFixed(5) + "°, " + lon.toFixed(5) + "°";
     }}
@@ -992,26 +1130,42 @@ def _control_page(videos=None, images=None, role="admin"):
     pollStatus();
     setInterval(pollStatus, 3000);
 
-    // Controls panel: one full-width button per predefined NMEA sentence
-    // (see pages/protocole_controle.html for the full field reference).
-    // Clicking most of these buttons never sends anything by itself -- it
-    // only fills the console input with that sentence's beginning (its
-    // type plus a trailing comma for types that take fields) so the
-    // specific values can be typed in before pressing Enter. The button's
-    // own label shows a complete example so it's clear what to fill in.
-    // "GPS route" is the one exception (action instead of prefix): a route
-    // can be arbitrarily long, so there's no reasonable text to prefill --
-    // it opens a file picker instead and sends a whole RTE sentence built
-    // from the file's content once one is chosen (see gpsRouteInput below).
+    // Controls panel: one full-width button per command a human actually
+    // needs a shortcut for (see pages/protocole_controle.html for the
+    // full protocol reference -- DRV, MOD, PID and STA are all still
+    // valid sentences over the wire and typeable in the console below,
+    // they just no longer get their own quick-fill button here, see the
+    // 2026-09-12 redesign notes there). Order matters: this is the order
+    // they're actually needed in, top to bottom -- set a target, arm
+    // driving to it, check the camera, and STOP always last/lowest so it
+    // never moves under a moving thumb.
+    //
+    // Most of these buttons never send anything by themselves -- clicking
+    // just fills the console input with that sentence's beginning (type
+    // plus a trailing comma) so the specific values can be typed in before
+    // pressing Enter; the label shows a complete example of what to fill
+    // in. Three exceptions (action instead of prefix):
+    // - "GPS Driving" (was "GPS route"): a route can be arbitrarily long,
+    //   so there's no reasonable text to prefill -- it opens a file picker
+    //   instead and sends a whole RTE sentence built from the file's
+    //   content once one is chosen (see gpsRouteInput below).
+    // - "Distance + angle" (2026-09-12): drops down a small inline form
+    //   (see buildDistanceAnglePanel below) instead of a file picker or a
+    //   console prefix -- it fetches the robot's current position and
+    //   heading (STA), computes the GPS point that many meters away at
+    //   (current heading + the entered angle), and sends that point as a
+    //   plain NAV -- no new sentence type needed, this just automates
+    //   picking the NAV,lat,lon fields instead of typing them by hand.
+    //   Placed directly above STOP (second-to-last) at the user's request.
+    // - "STOP" (was "STP"): an emergency stop must not wait on a second
+    //   keystroke -- clicking it sends STP immediately, no console step at
+    //   all (see the "stop" action branch below).
     const commandButtons = [
-      {{label: "STP",                          prefix: "STP"}},
-      {{label: "DRV,120,120",                   prefix: "DRV,"}},
       {{label: "NAV,4723.492,N,00044.340,W",    prefix: "NAV,"}},
-      {{label: "GPS route",                     action: "gpsRoute"}},
-      {{label: "MOD,MANUAL",                    prefix: "MOD,"}},
-      {{label: "PID,D,1.0,0.0,0.5",             prefix: "PID,"}},
+      {{label: "GPS Driving",                   action: "gpsRoute"}},
       {{label: "CAM,SNAP",                      prefix: "CAM,"}},
-      {{label: "STA",                          prefix: "STA"}},
+      {{label: "Distance + angle",              action: "distanceAngle"}},
+      {{label: "STOP",                          action: "stop"}},
     ];
 
     // Converts a signed decimal-degrees coordinate into this protocol's
@@ -1093,6 +1247,97 @@ def _control_page(videos=None, images=None, role="admin"):
       reader.readAsText(file);
     }});
 
+    // Builds the small inline form that drops down under the "Distance +
+    // angle" button when it's clicked: a distance (m) and a rotation
+    // angle (°, relative to the robot's current heading -- the user's
+    // explicit choice on 2026-09-12, over an absolute compass bearing)
+    // input, plus a send button. Returns the panel <div> (still hidden,
+    // see the "open" CSS class); the caller wires the toggle and appends
+    // both the button and this panel to the DOM.
+    function buildDistanceAnglePanel() {{
+      const panel = document.createElement("div");
+      panel.className = "cmd-distance-panel";
+
+      const distLabel = document.createElement("label");
+      distLabel.textContent = "Distance (m)";
+      const distInput = document.createElement("input");
+      distInput.type = "number";
+      distInput.step = "0.1";
+      distInput.min = "0";
+      distInput.placeholder = "10";
+      distLabel.appendChild(distInput);
+
+      const angleLabel = document.createElement("label");
+      angleLabel.textContent = "Angle (°, / cap actuel)";
+      const angleInput = document.createElement("input");
+      angleInput.type = "number";
+      angleInput.step = "1";
+      angleInput.placeholder = "0";
+      angleLabel.appendChild(angleInput);
+
+      const sendBtn = document.createElement("button");
+      sendBtn.type = "button";
+      sendBtn.textContent = "Envoyer";
+
+      sendBtn.addEventListener("click", async () => {{
+        const distance = parseFloat(distInput.value);
+        const angle = parseFloat(angleInput.value);
+        if (!Number.isFinite(distance) || distance <= 0) {{
+          logLine("Distance + angle: entrer une distance en mètres (&gt; 0)", "err");
+          return;
+        }}
+        if (!Number.isFinite(angle)) {{
+          logLine("Distance + angle: entrer un angle de rotation en degrés", "err");
+          return;
+        }}
+
+        // Always ask the robot for a fresh fix rather than reusing the
+        // status bar's last poll (up to 3s stale) -- this command computes
+        // a real target to drive to, so it deserves the robot's actual
+        // position and heading right now, not a moment ago.
+        const data = await sendToRobot("STA");
+        if (!data.ok || !data.fields || data.fields.length < 14) {{
+          logLine("Distance + angle: impossible de lire la position actuelle du robot (STA a échoué)", "err");
+          return;
+        }}
+        const [lat, latDir, lon, lonDir, cap, speed] = data.fields;
+        const curLat = nmeaToDecimal(lat, latDir);
+        const curLon = nmeaToDecimal(lon, lonDir);
+        if (curLat === null || (curLat === 0 && curLon === 0)) {{
+          logLine("Distance + angle: pas de position GPS sur le robot actuellement", "err");
+          return;
+        }}
+
+        const heading = parseFloat(cap) || 0;
+        if (parseFloat(speed) === 0) {{
+          // Documented limitation (protocole_controle.html): there's no
+          // compass/IMU on this robot, so "cap" (course over ground) is
+          // only meaningful while it's already moving -- at a standstill
+          // it's stale/noisy. The angle is still applied on top of it (the
+          // chosen design), but the user is warned so a target computed
+          // from a meaningless heading isn't a silent surprise.
+          logLine(
+            "Distance + angle: le robot est à l'arrêt, son cap (" +
+              heading.toFixed(0) +
+              "°) peut ne pas être fiable — la cible est calculée à partir de lui quand même",
+            "sys"
+          );
+        }}
+
+        const targetBearing = ((heading + angle) % 360 + 360) % 360;
+        const [destLat, destLon] = destinationPoint(curLat, curLon, distance, targetBearing);
+        const [latStr, latDirOut] = decimalToNmea(destLat, false);
+        const [lonStr, lonDirOut] = decimalToNmea(destLon, true);
+        sendCommand("NAV," + latStr + "," + latDirOut + "," + lonStr + "," + lonDirOut);
+        panel.classList.remove("open");
+      }});
+
+      panel.appendChild(distLabel);
+      panel.appendChild(angleLabel);
+      panel.appendChild(sendBtn);
+      return panel;
+    }}
+
     // controlsButtons doesn't exist for a read-only (viewer) session --
     // that panel shows a plain message instead, see _control_page().
     const controlsButtons = document.getElementById("controlsButtons");
@@ -1100,12 +1345,29 @@ def _control_page(videos=None, images=None, role="admin"):
       for (const buttonDef of commandButtons) {{
         const btn = document.createElement("button");
         btn.type = "button";
-        btn.className = "cmd-button";
         btn.textContent = buttonDef.label;
         if (buttonDef.action === "gpsRoute") {{
+          btn.className = "cmd-button";
           btn.title = "Pick a text file with one 'lat,lon' GPS point per line";
           btn.addEventListener("click", () => gpsRouteInput.click());
+        }} else if (buttonDef.action === "distanceAngle") {{
+          btn.className = "cmd-button";
+          btn.title = "Enter a distance and a rotation angle (relative to the robot's current heading) and send the computed GPS point as NAV";
+          const panel = buildDistanceAnglePanel();
+          btn.addEventListener("click", () => panel.classList.toggle("open"));
+          controlsButtons.appendChild(btn);
+          controlsButtons.appendChild(panel);
+          continue;
+        }} else if (buttonDef.action === "stop") {{
+          // Emergency stop: sends STP the moment this is clicked, same as
+          // pressing Enter on a typed "STP" would -- no console step, no
+          // second click, nothing to type. Logged to the visible Console
+          // tab (logToConsole: true) same as any command a person sends.
+          btn.className = "cmd-button-danger";
+          btn.title = "Immediately sends STP -- stops both motors right now";
+          btn.addEventListener("click", () => sendCommand("STP"));
         }} else {{
+          btn.className = "cmd-button";
           btn.addEventListener("click", () => {{
             input.value = buttonDef.prefix;
             input.focus();

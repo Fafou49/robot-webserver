@@ -20,7 +20,10 @@ robot-webserver/
 ├── .env.example           modele de configuration (identifiants, cle de session, IP du robot)
 ├── pages/                 pages HTML statiques a afficher
 │   ├── rapport_rover_dgps.html
-│   └── protocole_controle.html
+│   ├── protocole_controle.html
+│   └── architecture_webserver.html
+├── static/                servi automatiquement par Flask sur /static/<fichier>
+│   └── tech_stack.png     image de fond de /pages (technologies du projet en cercle autour de Claude)
 ├── media/
 │   ├── videos/            videos a afficher dans l'espace "Video feed" de /control
 │   └── images/            images du diaporama dans l'espace "Images" de /control
@@ -118,6 +121,16 @@ DHCP par adresse MAC), donc elles ne devraient plus changer.
 Dépose n'importe quel fichier `.html` autonome (CSS/JS/images intégrés,
 sans dépendance externe) dans `pages/` — il apparaîtra automatiquement dans
 la liste sur `/` et sera servi tel quel sur `/pages/<nom-du-fichier>.html`.
+
+La page `/pages` elle-même (la liste, pas les fichiers qu'elle liste) a son
+propre habillage dans `app.py` (`_page()`) : fond d'écran fixe
+(`static/tech_stack.png`, les technologies du projet en cercle autour de
+Claude), liens en bleu `#58a6ff` (même couleur que le cercle autour de
+Claude sur l'image, et que l'accent déjà utilisé sur `/control`), contenu
+dans un panneau semi-transparent pour rester lisible quel que soit
+l'endroit de l'image qui se trouve derrière. Remplacer `static/tech_stack.png`
+par une autre image (même nom, ou changer l'URL dans `_page()`) suffit pour
+en changer.
 
 ## Ajouter des vidéos et des images (page /control)
 
