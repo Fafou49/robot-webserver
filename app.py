@@ -554,6 +554,7 @@ def _control_page(role="admin"):
       color: #8b949e;
     }}
     .map-legend span {{ display: inline-flex; align-items: center; gap: 5px; }}
+    .map-hint {{ color: #656d76; font-style: italic; }}
     .map-dot {{
       display: inline-block;
       width: 9px;
@@ -565,6 +566,13 @@ def _control_page(role="admin"):
     .map-dot-waypoint {{ background: #58a6ff; }}
     .map-dot-route {{ background: #f85149; }}
     .map-dot-media {{ background: #8957e5; }}
+
+    /* Distance scale bar (bottom-left of the map, drawn fresh on every
+       redraw -- see drawMapScaleBar() below): plain SVG line/text
+       elements, styled here rather than with setAttribute so they read
+       the same light-surface colour scheme as the grid they sit on. */
+    .map-scale-bar line {{ stroke: #57606a; stroke-width: 1.5; }}
+    .map-scale-bar text {{ font-size: 10px; font-family: "Courier New", monospace; fill: #41464c; }}
 
     /* Hover tooltip: floats over the map at the cursor position (see the
        script below) -- pointer-events:none so it can never itself be the
@@ -871,6 +879,7 @@ def _control_page(role="admin"):
           <span><i class="map-dot map-dot-waypoint"></i>Waypoints</span>
           <span><i class="map-dot map-dot-route"></i>NAV / GPS Driving</span>
           <span><i class="map-dot map-dot-media"></i>Photos / Videos</span>
+          <span class="map-hint">Scroll to zoom &middot; double-click to reset &middot; right-click a waypoint/photo/video to delete</span>
         </div>
       </div>
     </div>
@@ -1216,15 +1225,33 @@ def _control_page(role="admin"):
     const MAP_NS = "http://www.w3.org/2000/svg";
     const MAP_VIEW_SIZE = 400;
     const MAP_COLORS = {{robot: "#3fb950", waypoint: "#58a6ff", route: "#f85149", media: "#8957e5"}};
+    // Fixed margin/usable area, in the same MAP_VIEW_SIZE x MAP_VIEW_SIZE
+    // units as the <svg>'s own (unchanging) viewBox -- see
+    // projectorsFromBounds() below for why zoom never touches the
+    // viewBox itself, only which lat/lon rectangle maps onto it.
+    const MAP_MARGIN = MAP_VIEW_SIZE * 0.08;
+    const MAP_USABLE = MAP_VIEW_SIZE - MAP_MARGIN * 2;
+    const MAP_MIN_SPAN_DEG = 0.00004; // roughly 4m at mid-latitudes -- deepest zoom-in allowed
 
-    // Builds a (lat, lon) -> [x, y] projection fit to `points`' own
-    // bounding box, in MAP_VIEW_SIZE x MAP_VIEW_SIZE viewBox units -- this
-    // is the "zoom adjusts to the points" requirement: there is no fixed
-    // scale, every redraw re-fits to whatever's currently known. A
-    // degenerate box (0 or 1 distinct positions) gets a small fixed-size
-    // padding instead of a zero-size span, which would otherwise divide
-    // by zero.
-    function projectPoints(points) {{
+    // Current lat/lon rectangle the map displays. Auto-fit to whatever
+    // points are currently known UNLESS the user has manually zoomed
+    // (mapUserZoomed) -- see redrawMap()/the wheel handler below. Reset
+    // to auto-fit again on a double-click.
+    let mapBounds = null;
+    let mapUserZoomed = false;
+    let mapLastPoints = [];
+    let mapLastWaypointPts = [];
+    // The robot's own last-known position (from STA), kept outside
+    // pollMap()'s own scope so showMapTooltip() can compute "distance to
+    // robot" for a hovered marker -- null whenever there's no live fix,
+    // so the tooltip can say so rather than show a stale distance.
+    let lastRobotLatLon = null;
+
+    // Computes the auto-fit bounding box of `points`' own lat/lon values,
+    // with a small fixed-size padding on a degenerate (0/1 distinct
+    // position) box instead of a zero-size span, which would otherwise
+    // divide by zero.
+    function computeBounds(points) {{
       const lats = points.map((p) => p.lat);
       const lons = points.map((p) => p.lon);
       let minLat = Math.min(...lats), maxLat = Math.max(...lats);
@@ -1232,15 +1259,30 @@ def _control_page(role="admin"):
       const PAD_DEG = 0.0002; // roughly 20m at mid-latitudes
       if (maxLat - minLat < PAD_DEG) {{ minLat -= PAD_DEG; maxLat += PAD_DEG; }}
       if (maxLon - minLon < PAD_DEG) {{ minLon -= PAD_DEG; maxLon += PAD_DEG; }}
-      const latSpan = maxLat - minLat;
-      const lonSpan = maxLon - minLon;
-      const margin = MAP_VIEW_SIZE * 0.08; // keeps an edge point's marker fully visible, not clipped
-      const usable = MAP_VIEW_SIZE - margin * 2;
-      return (lat, lon) => [
-        margin + ((lon - minLon) / lonSpan) * usable,
+      return {{minLat, maxLat, minLon, maxLon}};
+    }}
+
+    // Builds the (lat, lon) <-> [x, y] projection for one bounds
+    // rectangle, in MAP_VIEW_SIZE x MAP_VIEW_SIZE viewBox units. Mouse-
+    // wheel zoom (see below) works entirely by choosing a SMALLER (or
+    // bigger) `bounds` rectangle to map onto the same fixed 0..400
+    // square -- the <svg>'s own viewBox attribute never changes, which
+    // keeps this simple and keeps every existing screen-space assumption
+    // (margins, hit areas, tooltip positioning) valid at any zoom level.
+    function projectorsFromBounds(bounds) {{
+      const {{minLat, maxLat, minLon, maxLon}} = bounds;
+      const latSpan = (maxLat - minLat) || MAP_MIN_SPAN_DEG;
+      const lonSpan = (maxLon - minLon) || MAP_MIN_SPAN_DEG;
+      const project = (lat, lon) => [
+        MAP_MARGIN + ((lon - minLon) / lonSpan) * MAP_USABLE,
         // Latitude increases northward, SVG y increases downward -- flip.
-        margin + (1 - (lat - minLat) / latSpan) * usable,
+        MAP_MARGIN + (1 - (lat - minLat) / latSpan) * MAP_USABLE,
       ];
+      const invert = (x, y) => [
+        minLat + (1 - (y - MAP_MARGIN) / MAP_USABLE) * latSpan,
+        minLon + ((x - MAP_MARGIN) / MAP_USABLE) * lonSpan,
+      ];
+      return {{project, invert}};
     }}
 
     function clearMap() {{
@@ -1258,12 +1300,31 @@ def _control_page(role="admin"):
       mapTooltip.style.top = (evt.clientY - wrap.top + 14) + "px";
     }}
 
+    function formatMeters(d) {{
+      return d < 1000 ? `${{d.toFixed(1)}} m` : `${{(d / 1000).toFixed(2)}} km`;
+    }}
+
     function showMapTooltip(evt, data) {{
       let html = `<strong>${{escapeHtml(data.label)}}</strong><br>${{data.lat.toFixed(5)}}°, ${{data.lon.toFixed(5)}}°`;
+      // Distance-to-robot (2026-10-05 explicit user request): every
+      // marker except the robot's own (nothing to measure) and the
+      // violet photo/video markers (which show a thumbnail instead, see
+      // below) gets its live distance to the robot's current position.
+      if (!data.media && data.label !== "Robot") {{
+        if (lastRobotLatLon) {{
+          const d = haversineMeters(lastRobotLatLon.lat, lastRobotLatLon.lon, data.lat, data.lon);
+          html += `<br>Distance to robot: ${{formatMeters(d)}}`;
+        }} else {{
+          html += "<br>Distance to robot: unavailable (no GPS fix)";
+        }}
+      }}
       if (data.ts) {{
         html += `<br>${{new Date(data.ts * 1000).toLocaleString()}}`;
       }} else if (data.noTimestamp) {{
         html += "<br>no timestamp available";
+      }}
+      if (data.deleteAction) {{
+        html += '<br><span class="map-tooltip-note">right-click to delete</span>';
       }}
       mapTooltip.innerHTML = html;
       mapTooltip.hidden = false;
@@ -1294,6 +1355,29 @@ def _control_page(role="admin"):
       positionMapTooltip(evt);
     }}
 
+    // Right-click delete (2026-10-05 explicit user request): only blue
+    // waypoints and violet photos/videos carry a `deleteAction` (see
+    // pollMap() below) -- there's no backing file/store to delete a red
+    // "NAV sent"/"GPS Driving" point or the robot's own position FROM, so
+    // those simply don't get a contextmenu handler at all (right-click on
+    // one falls through to the browser's normal context menu).
+    async function deleteWaypointPoint(index) {{
+      const res = await sendToRobot(`WPD,${{index}}`);
+      if (res.ok) pollMap();
+    }}
+
+    async function deleteMediaPoint(filename, kind) {{
+      const what = kind === "video" ? "this video" : "this photo";
+      const ok = confirm(
+        `Delete ${{what}} (${{filename}})? This removes it from the robot's camera ` +
+        "buffer (and its saved position) -- it cannot be undone."
+      );
+      if (!ok) return;
+      const wireKind = kind === "video" ? "VID" : "SNAP";
+      const res = await sendToRobot(`MDD,${{filename}},${{wireKind}}`);
+      if (res.ok) pollMap();
+    }}
+
     function addMapCircle(x, y, radius, data) {{
       const circle = document.createElementNS(MAP_NS, "circle");
       circle.setAttribute("cx", x);
@@ -1306,6 +1390,17 @@ def _control_page(role="admin"):
       circle.addEventListener("mouseenter", (evt) => showMapTooltip(evt, data));
       circle.addEventListener("mousemove", positionMapTooltip);
       circle.addEventListener("mouseleave", hideMapTooltip);
+      if (data.deleteAction) {{
+        circle.addEventListener("contextmenu", (evt) => {{
+          evt.preventDefault();
+          hideMapTooltip();
+          if (data.deleteAction.type === "waypoint") {{
+            deleteWaypointPoint(data.deleteAction.index);
+          }} else if (data.deleteAction.type === "media") {{
+            deleteMediaPoint(data.deleteAction.filename, data.deleteAction.kind);
+          }}
+        }});
+      }}
       gpsMapSvg.appendChild(circle);
     }}
 
@@ -1320,6 +1415,131 @@ def _control_page(role="admin"):
       line.setAttribute("stroke-opacity", "0.6");
       gpsMapSvg.insertBefore(line, gpsMapSvg.firstChild); // behind every point marker
     }}
+
+    // Distance scale bar (2026-10-05 explicit user request), bottom-left,
+    // in fixed SVG viewBox units (so it never has to deal with the CSS
+    // pixel size the <svg> happens to be rendered at). Standard map
+    // scale-bar algorithm: measure how many real meters the *maximum*
+    // bar width currently represents (via the live projection's own
+    // invert()), then pick the largest "nice" round number of meters
+    // that still fits in that width, and draw the bar at the (shorter,
+    // exact) pixel length THAT nice number actually needs.
+    const MAP_SCALE_BAR_MAX_UNITS = 80;
+    const MAP_SCALE_NICE_METERS = [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000, 50000, 100000];
+
+    function drawMapScaleBar(invert) {{
+      const x0 = 14, x1 = x0 + MAP_SCALE_BAR_MAX_UNITS, y = MAP_VIEW_SIZE - 14;
+      const [latA, lonA] = invert(x0, y);
+      const [latB, lonB] = invert(x1, y);
+      const metersForMaxWidth = haversineMeters(latA, lonA, latB, lonB);
+      if (!isFinite(metersForMaxWidth) || metersForMaxWidth <= 0) return;
+      const metersPerUnit = metersForMaxWidth / MAP_SCALE_BAR_MAX_UNITS;
+
+      let niceMeters = MAP_SCALE_NICE_METERS[0];
+      for (const m of MAP_SCALE_NICE_METERS) {{
+        if (m / metersPerUnit <= MAP_SCALE_BAR_MAX_UNITS) niceMeters = m;
+        else break;
+      }}
+      const barWidthUnits = niceMeters / metersPerUnit;
+
+      const group = document.createElementNS(MAP_NS, "g");
+      group.setAttribute("class", "map-scale-bar");
+      const line = document.createElementNS(MAP_NS, "line");
+      line.setAttribute("x1", x0);
+      line.setAttribute("x2", x0 + barWidthUnits);
+      line.setAttribute("y1", y);
+      line.setAttribute("y2", y);
+      group.appendChild(line);
+      for (const tx of [x0, x0 + barWidthUnits]) {{
+        const tick = document.createElementNS(MAP_NS, "line");
+        tick.setAttribute("x1", tx);
+        tick.setAttribute("x2", tx);
+        tick.setAttribute("y1", y - 3);
+        tick.setAttribute("y2", y + 3);
+        group.appendChild(tick);
+      }}
+      const label = document.createElementNS(MAP_NS, "text");
+      label.setAttribute("x", x0);
+      label.setAttribute("y", y - 6);
+      label.textContent = niceMeters >= 1000
+        ? `${{(niceMeters / 1000).toFixed(niceMeters % 1000 === 0 ? 0 : 1)}} km`
+        : `${{niceMeters}} m`;
+      group.appendChild(label);
+      gpsMapSvg.appendChild(group);
+    }}
+
+    // Redraws every currently-known point (mapLastPoints/
+    // mapLastWaypointPts, refreshed by pollMap() every 5s) against
+    // mapBounds -- called both after a fresh poll and immediately after
+    // a wheel-zoom/double-click reset, so zooming feels instant rather
+    // than waiting for the next network round-trip.
+    function redrawMap() {{
+      const points = mapLastPoints;
+      clearMap();
+      if (points.length === 0) return;
+      if (!mapUserZoomed || !mapBounds) {{
+        mapBounds = computeBounds(points);
+      }}
+      const {{project, invert}} = projectorsFromBounds(mapBounds);
+
+      for (let i = 0; i + 1 < mapLastWaypointPts.length; i++) {{
+        const [x1, y1] = project(mapLastWaypointPts[i].lat, mapLastWaypointPts[i].lon);
+        const [x2, y2] = project(mapLastWaypointPts[i + 1].lat, mapLastWaypointPts[i + 1].lon);
+        addMapLine(x1, y1, x2, y2, MAP_COLORS.waypoint);
+      }}
+
+      for (const p of points) {{
+        const [x, y] = project(p.lat, p.lon);
+        addMapCircle(x, y, p.radius, p);
+      }}
+
+      drawMapScaleBar(invert);
+    }}
+
+    // Mouse-wheel zoom (2026-10-05 explicit user request), targeting the
+    // CURSOR's position, not the robot's: shrinks (or grows) mapBounds
+    // around the lat/lon currently under the pointer, keeping that exact
+    // point under the pointer on screen before and after. Once the user
+    // has zoomed at all, pollMap()'s auto-fit stops moving the view out
+    // from under them (see redrawMap() above) -- double-click resets it.
+    gpsMapSvg.addEventListener("wheel", (evt) => {{
+      if (!mapBounds) return;
+      evt.preventDefault();
+      const rect = gpsMapSvg.getBoundingClientRect();
+      const svgX = ((evt.clientX - rect.left) / rect.width) * MAP_VIEW_SIZE;
+      const svgY = ((evt.clientY - rect.top) / rect.height) * MAP_VIEW_SIZE;
+      const {{invert}} = projectorsFromBounds(mapBounds);
+      const [curLat, curLon] = invert(svgX, svgY);
+
+      const ZOOM_STEP = 1.25;
+      const zoomingIn = evt.deltaY < 0;
+      const factor = zoomingIn ? 1 / ZOOM_STEP : ZOOM_STEP;
+      const latSpan = mapBounds.maxLat - mapBounds.minLat;
+      const lonSpan = mapBounds.maxLon - mapBounds.minLon;
+      const newLatSpan = Math.max(MAP_MIN_SPAN_DEG, latSpan * factor);
+      const newLonSpan = Math.max(MAP_MIN_SPAN_DEG, lonSpan * factor);
+      if (newLatSpan === latSpan && newLonSpan === lonSpan) return; // already at the zoom-in floor
+
+      // The cursor's point sat at fraction (fracX, fracYFromTop) of the
+      // usable area before -- keep it at that same fraction after the
+      // span changes (same derivation as projectorsFromBounds()'s own
+      // project()/invert(), solved for the new bounds).
+      const fracX = (svgX - MAP_MARGIN) / MAP_USABLE;
+      const fracYFromTop = (svgY - MAP_MARGIN) / MAP_USABLE;
+      const newMinLon = curLon - fracX * newLonSpan;
+      const newMaxLat = curLat + fracYFromTop * newLatSpan;
+      mapBounds = {{
+        minLon: newMinLon, maxLon: newMinLon + newLonSpan,
+        maxLat: newMaxLat, minLat: newMaxLat - newLatSpan,
+      }};
+      mapUserZoomed = true;
+      redrawMap();
+    }}, {{passive: false}});
+
+    gpsMapSvg.addEventListener("dblclick", () => {{
+      mapUserZoomed = false;
+      redrawMap();
+    }});
 
     // Decodes WPT/GRT's shared "count, then count*4 fields
     // (lat,lat_dir,lon,lon_dir)" shape into plain {{lat, lon}} pairs.
@@ -1346,6 +1566,7 @@ def _control_page(role="admin"):
         ]);
 
         const points = [];
+        let robotFixOk = false;
 
         if (staData.ok && staData.fields && staData.fields.length >= 4) {{
           const [lat, latDir, lon, lonDir] = staData.fields;
@@ -1353,14 +1574,18 @@ def _control_page(role="admin"):
           const curLon = nmeaToDecimal(lon, lonDir);
           if (curLat !== null && (curLat !== 0 || curLon !== 0)) {{
             points.push({{lat: curLat, lon: curLon, color: MAP_COLORS.robot, radius: 6, label: "Robot"}});
+            lastRobotLatLon = {{lat: curLat, lon: curLon}};
+            robotFixOk = true;
           }}
         }}
+        if (!robotFixOk) lastRobotLatLon = null;
 
         const waypointPts = wptData.ok ? decodeLatLonList(wptData.fields) : [];
         waypointPts.forEach((p, i) => {{
           points.push({{
             lat: p.lat, lon: p.lon, color: MAP_COLORS.waypoint, radius: 4,
             label: `Waypoint ${{i + 1}}`, noTimestamp: true,
+            deleteAction: {{type: "waypoint", index: i}},
           }});
         }});
 
@@ -1387,29 +1612,20 @@ def _control_page(role="admin"):
             const dLat = nmeaToDecimal(lat, latDir);
             const dLon = nmeaToDecimal(lon, lonDir);
             if (dLat === null) continue;
+            const mediaKind = kind === "VID" ? "video" : "photo";
             points.push({{
               lat: dLat, lon: dLon, color: MAP_COLORS.media, radius: 4,
               label: kind === "VID" ? "Video" : "Photo",
               ts: parseInt(ts, 10) || null,
-              media: {{filename, kind: kind === "VID" ? "video" : "photo"}},
+              media: {{filename, kind: mediaKind}},
+              deleteAction: {{type: "media", filename, kind: mediaKind}},
             }});
           }}
         }}
 
-        clearMap();
-        if (points.length === 0) return;
-        const project = projectPoints(points);
-
-        for (let i = 0; i + 1 < waypointPts.length; i++) {{
-          const [x1, y1] = project(waypointPts[i].lat, waypointPts[i].lon);
-          const [x2, y2] = project(waypointPts[i + 1].lat, waypointPts[i + 1].lon);
-          addMapLine(x1, y1, x2, y2, MAP_COLORS.waypoint);
-        }}
-
-        for (const p of points) {{
-          const [x, y] = project(p.lat, p.lon);
-          addMapCircle(x, y, p.radius, p);
-        }}
+        mapLastPoints = points;
+        mapLastWaypointPts = waypointPts;
+        redrawMap();
       }} catch (err) {{
         // Silent on failure, same spirit as pollStatus() above.
       }} finally {{
@@ -1851,6 +2067,50 @@ def _media_page(videos=None, images=None, role="admin"):
       border-radius: 8px;
       object-fit: contain;
     }}
+
+    /* Right column split in half, top/bottom (2026-10-05 explicit user
+       request): Images (Pi #2's own slideshow, unchanged) keeps rotating
+       in the top half; a new "Robot camera" carousel -- the robot's OWN
+       5 photos + 5 videos (camera/stream_server.py on Pi #1) -- cycles in
+       the bottom half. */
+    .panel-split {{
+      flex-direction: column;
+      gap: 0;
+    }}
+    .sub-panel {{
+      flex: 1 1 50%;
+      min-height: 0;
+      width: 100%;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 10px 0;
+    }}
+    .sub-panel:first-child {{ border-bottom: 1px solid #30363d; }}
+    .sub-panel h2 {{
+      font-size: 13px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: #8b949e;
+      margin: 0 0 10px;
+    }}
+
+    .robot-media-area {{
+      width: 100%;
+      height: 100%;
+      min-height: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }}
+    .robot-media-img, .robot-media-video {{
+      max-width: 100%;
+      max-height: 100%;
+      border-radius: 8px;
+      object-fit: contain;
+      background: #000;
+    }}
   </style>
 </head>
 <body>
@@ -1872,9 +2132,19 @@ def _media_page(videos=None, images=None, role="admin"):
         <div id="recordedVideoArea">{video_html}</div>
       </div>
     </div>
-    <div class="panel">
-      <h2>Images</h2>
-      {images_html}
+    <div class="panel panel-split">
+      <div class="sub-panel">
+        <h2>Images</h2>
+        {images_html}
+      </div>
+      <div class="sub-panel">
+        <h2>Robot camera</h2>
+        <div class="robot-media-area">
+          <div class="placeholder" id="robotMediaPlaceholder">No photos/videos on the robot yet</div>
+          <img class="robot-media-img" id="robotMediaImg" alt="Robot photo" hidden>
+          <video class="robot-media-video" id="robotMediaVideo" muted playsinline hidden></video>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -1953,6 +2223,89 @@ def _media_page(videos=None, images=None, role="admin"):
         }}, 3000);
       }}
     }}
+
+    // Robot camera carousel (2026-10-05 explicit user request): cycles
+    // through whatever's currently in the robot's own capped camera
+    // buffers (up to 5 photos + up to 5 videos, see /media/robot_feed) --
+    // photos first (3s each), then videos (autoplayed to completion),
+    // looping back to the first photo once the last video ends. Entirely
+    // separate from the Images slideshow above (Pi #2's own photos,
+    // unchanged) -- that one keeps rotating independently in its own
+    // half of this column; this is the robot's OWN photos/videos, in the
+    // new bottom half.
+    const robotMediaImg = document.getElementById("robotMediaImg");
+    const robotMediaVideo = document.getElementById("robotMediaVideo");
+    const robotMediaPlaceholder = document.getElementById("robotMediaPlaceholder");
+    const ROBOT_MEDIA_PHOTO_MS = 3000;
+    const ROBOT_MEDIA_REFRESH_MS = 30000; // how often the playlist itself is re-fetched from the robot
+    let robotMediaItems = [];
+    let robotMediaIndex = 0;
+    let robotMediaTimer = null;
+
+    function showRobotMediaItem(i) {{
+      if (robotMediaItems.length === 0) return;
+      clearTimeout(robotMediaTimer);
+      const item = robotMediaItems[i];
+      const url = `/media/thumb/${{item.kind}}/${{encodeURIComponent(item.filename)}}`;
+      if (item.kind === "video") {{
+        robotMediaImg.hidden = true;
+        robotMediaVideo.hidden = false;
+        robotMediaVideo.src = url;
+        robotMediaVideo.currentTime = 0;
+        robotMediaVideo.play().catch(() => {{
+          // Autoplay blocked, or the file is no longer reachable -- don't
+          // get stuck on it, just move on after the same duration a
+          // photo would get.
+          robotMediaTimer = setTimeout(advanceRobotMedia, ROBOT_MEDIA_PHOTO_MS);
+        }});
+      }} else {{
+        robotMediaVideo.hidden = true;
+        robotMediaVideo.pause();
+        robotMediaImg.hidden = false;
+        robotMediaImg.src = url;
+        robotMediaTimer = setTimeout(advanceRobotMedia, ROBOT_MEDIA_PHOTO_MS);
+      }}
+    }}
+
+    function advanceRobotMedia() {{
+      if (robotMediaItems.length === 0) return;
+      robotMediaIndex = (robotMediaIndex + 1) % robotMediaItems.length;
+      showRobotMediaItem(robotMediaIndex);
+    }}
+
+    robotMediaVideo.addEventListener("ended", advanceRobotMedia);
+    robotMediaVideo.addEventListener("error", advanceRobotMedia);
+    robotMediaImg.addEventListener("error", advanceRobotMedia);
+
+    async function refreshRobotMediaPlaylist() {{
+      let data;
+      try {{
+        const res = await fetch("{url_for('media_robot_feed')}");
+        data = await res.json();
+      }} catch (err) {{
+        return; // robot unreachable right now -- keep showing whatever's already playing
+      }}
+      if (!data.ok || !data.items || data.items.length === 0) {{
+        if (robotMediaItems.length === 0) {{
+          robotMediaPlaceholder.hidden = false;
+          robotMediaImg.hidden = true;
+          robotMediaVideo.hidden = true;
+        }}
+        return;
+      }}
+      const wasEmpty = robotMediaItems.length === 0;
+      robotMediaItems = data.items;
+      robotMediaPlaceholder.hidden = true;
+      if (wasEmpty) {{
+        robotMediaIndex = 0;
+        showRobotMediaItem(0);
+      }} else {{
+        robotMediaIndex = Math.min(robotMediaIndex, robotMediaItems.length - 1);
+      }}
+    }}
+
+    refreshRobotMediaPlaylist();
+    setInterval(refreshRobotMediaPlaylist, ROBOT_MEDIA_REFRESH_MS);
   </script>
 
 </body>
@@ -2144,6 +2497,41 @@ def media_thumb(kind, filename):
             f.write(upstream.content)
 
     return send_from_directory(MEDIA_THUMB_CACHE_DIR, cache_name, mimetype=content_type)
+
+
+@app.route("/media/robot_feed")
+@login_required
+def media_robot_feed():
+    """JSON listing of what's currently in the robot's own capped camera
+    buffers (Pi #1, camera/stream_server.py -- the same up-to-5-photos/
+    up-to-5-videos rolling stores already exposed for /control's violet
+    map markers via the MED sentence) -- backs the "Robot camera" panel
+    on /media (2026-10-05 explicit user request): a carousel that cycles
+    through these, photos first (a few seconds each) then videos
+    (autoplayed to completion), looping back to the first photo once the
+    last video ends -- see _media_page()'s script.
+
+    `kind` on each item is "photo" or "video" (same vocabulary as
+    link.robot_state.RobotState.media_positions()), so the client can
+    build the right /media/thumb/<kind>/<filename> URL for it (that route
+    already does the actual fetch-and-cache from Pi #1). Returns
+    {"ok": false} rather than erroring if either store can't be listed
+    right now (Pi #1 unreachable, camera script not running) -- same
+    "camera is optional" spirit as everywhere else this project talks to
+    camera/stream_server.py -- so the carousel can show an empty state
+    instead of breaking the page."""
+    items = []
+    for label, kind in (("snapshots", "photo"), ("recordings", "video")):
+        url = f"http://{ROBOT_HOST}:{CAMERA_PORT}/{label}"
+        try:
+            resp = requests.get(url, timeout=CAMERA_TIMEOUT)
+            resp.raise_for_status()
+            names = resp.json().get(label, [])
+        except (requests.exceptions.RequestException, ValueError):
+            continue
+        for name in names:
+            items.append({"filename": name, "kind": kind})
+    return jsonify({"ok": True, "items": items})
 
 
 @app.route("/login", methods=["GET", "POST"])

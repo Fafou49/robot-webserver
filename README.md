@@ -220,6 +220,81 @@ l'intérieur au lieu d'agrandir la boîte (`min-height: 0` sur les
 conteneurs flex concernés — sans ça, un onglet qui se remplit pousse la
 boîte à grandir hors de l'écran plutôt que de rester en place).
 
+## Carte GPS (/control)
+
+À droite du panneau Controls, `/control` affiche une carte GPS simple (une
+grille, pas un fond de carte réel — ce robot roule en extérieur sans
+connexion internet fiable) qui place automatiquement tous les points GPS
+actuellement connus, avec un zoom qui s'ajuste à leur étendue. Elle
+interroge le robot toutes les 5 secondes (trames `STA`, `WPT`, `GRT`,
+`MED` — voir `pages/protocole_controle.html`) :
+
+- **Vert** : position actuelle du robot (`STA`).
+- **Bleu** : points sauvegardés sur la Raspberry Pi n°1 via le bouton `X`
+  de la manette (`WPT`), reliés par un trait fin dans l'ordre de
+  sauvegarde.
+- **Rouge** : la dernière cible envoyée manuellement ("NAV sent", suivie
+  uniquement côté site) ET la route "GPS Driving" actuellement active
+  (`GRT`) — volontairement regroupées sous une seule couleur, sans
+  distinction de forme.
+- **Violet** : position GPS des photos/vidéos prises par le robot
+  (`MED`) — survoler un point violet télécharge et affiche une miniature
+  (image statique pour une vidéo, jamais de lecture automatique) ; le
+  fichier n'est récupéré sur la Pi n°1 qu'au survol, et mis en cache dans
+  un dossier temporaire sur la Pi n°2 qui se vide à chaque rechargement
+  de `/control`.
+
+Au survol de tout autre point (2026-10-05, sauf les violets, qui
+affichent déjà une miniature), une vignette indique sa distance en
+mètres jusqu'au robot (calcul haversine, même formule que le bandeau
+d'état) — "unavailable" si le robot n'a pas de fix GPS pour le moment ; le
+point du robot lui-même n'affiche évidemment pas de distance.
+
+**Zoom à la molette** (2026-10-05) : zoome en ciblant le point SOUS LE
+CURSEUR, pas la position du robot — le point visé reste exactement sous
+la souris pendant qu'on zoome. Un double-clic réinitialise le zoom sur
+l'ajustement automatique (qui, sinon, ne bouge plus la vue une fois
+qu'on a zoomé manuellement, pour ne pas la faire sauter sous la souris au
+rafraîchissement suivant). Une échelle de distance (bas-gauche de la
+carte, en mètres ou en km) se recalcule à chaque zoom/dézoom.
+
+**Suppression d'un point au clic droit** (2026-10-05) :
+
+- Sur un point **bleu**, supprime immédiatement ce waypoint du fichier
+  `waypoints.txt` de la Pi n°1 (nouvelle trame `WPD`, par index plutôt
+  que par coordonnées pour éviter tout écart d'arrondi par rapport à ce
+  qui est réellement écrit dans le fichier). S'il était au milieu de la
+  liste, le segment se reforme automatiquement entre ses deux voisins dès
+  le prochain rafraîchissement — la carte reconnecte simplement les
+  points restants dans leur nouvel ordre, rien de spécifique à gérer.
+- Sur un point **violet**, demande confirmation puis supprime la
+  photo/vidéo à la fois du buffer caméra de la Pi n°1 (`camera/
+  snapshots.py`/`camera/recordings.py`) ET de sa ligne dans la base de
+  données de géolocalisation (nouvelle trame `MDD`) — irréversible.
+- Les points **rouge** (NAV envoyé / GPS Driving) et **vert** (robot) ne
+  sont volontairement pas supprimables par ce menu : rien ne les
+  sauvegarde individuellement côté Pi n°1 (une route "GPS Driving" vit en
+  mémoire tant qu'elle est active, "NAV sent" n'est même suivi que côté
+  site), donc il n'y a rien de propre à "retirer" point par point — le
+  clic droit y laisse simplement apparaître le menu contextuel normal du
+  navigateur.
+
+## Vignette caméra du robot (panneau droit de /media)
+
+Le panneau de droite de `/media` est désormais partagé en deux moitiés
+(2026-10-05) : en haut, le diaporama "Images" existant (photos stockées
+sur la Pi n°2, comportement inchangé) ; en bas, un nouveau carrousel
+"Robot camera" qui fait défiler les photos ET vidéos prises PAR LE ROBOT
+— les mêmes buffers tournants (max 5 photos + 5 vidéos) que
+`camera/stream_server.py` expose déjà pour les marqueurs violets de
+`/control`. Chaque photo s'affiche 3 secondes, puis les vidéos démarrent
+automatiquement les unes après les autres jusqu'à la dernière, avant de
+reboucler sur la première photo. La liste elle-même est rafraîchie depuis
+le robot toutes les 30 secondes (nouvelle route `/media/robot_feed`),
+sans interrompre ce qui est en cours de lecture ; chaque fichier est
+affiché via la route déjà existante `/media/thumb/<kind>/<filename>`
+(même cache à la demande que les miniatures de la carte GPS ci-dessus).
+
 ## Page Power (/power) — suivi solaire/batterie/charge
 
 Page autonome dédiée (lien "Power" dans le bandeau de navigation de
@@ -241,6 +316,12 @@ Comme `/control`, cette page est servie derrière le login — le compte
 étant une trame de lecture seule sans aucun effet sur le robot, elle a été
 ajoutée à la liste des commandes autorisées pour ce rôle dans `app.py`
 (`VIEWER_ALLOWED_COMMANDS`), au même titre que `STA`.
+
+Sa navigation (2026-10-05) ne contient plus que "Control page" et
+"Pages" — les liens directs vers `protocole_controle.html` et
+`power_explained.html` ont été retirés (explicite demande utilisateur) :
+ces deux pages restent accessibles, mais uniquement via le sommaire
+`/pages`, comme le reste des pages de référence.
 
 ## Caméra en direct (panneau "Video feed" de /control)
 
