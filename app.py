@@ -27,6 +27,7 @@ from dotenv import load_dotenv
 from flask import Flask, Response, abort, jsonify, redirect, request, send_from_directory, session, url_for
 from werkzeug.security import check_password_hash
 
+from power_history_client import PowerHistoryError, fetch_power_history
 from robot_link import send_command
 
 load_dotenv()
@@ -38,6 +39,17 @@ IMAGES_DIR = os.path.join(MEDIA_DIR, "images")
 
 VIDEO_EXTENSIONS = (".mp4", ".webm", ".ogg", ".mov")
 IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".gif", ".webp")
+
+# /control's GPS map (2026-10-05): on-demand, short-lived cache for the
+# photo/video thumbnails shown when hovering a violet marker (see
+# media_thumb() below) -- these files live on Pi #1's camera process, NOT
+# in MEDIA_DIR/videos or images above (that's a separate, manually curated
+# folder, see _list_media()), and are only ever downloaded to Pi #2 when
+# the two Pis are actually in contact (explicit user request). Wiped every
+# time /control is (re)loaded (see control() below) rather than kept
+# indefinitely -- it mirrors whatever's CURRENTLY hoverable on the map,
+# not a permanent archive.
+MEDIA_THUMB_CACHE_DIR = os.path.join(MEDIA_DIR, "tmp_media_cache")
 
 # Where the robot's control server (Pi #1, link/server.py) listens.
 ROBOT_HOST = os.environ.get("ROBOT_HOST", "192.168.1.180")
@@ -70,11 +82,13 @@ WEBSERVER_VIEWER_PASSWORD_HASH = os.environ.get("WEBSERVER_VIEWER_PASSWORD_HASH"
 
 FLASK_SECRET_KEY = os.environ.get("FLASK_SECRET_KEY") or secrets.token_hex(32)
 
-# Commands a viewer/guest session is allowed to send via /api/send. STA has
-# no fields and only reads telemetry back, so it can't affect the robot --
+# Commands a viewer/guest session is allowed to send via /api/send. STA,
+# PWR, WPT, GRT and MED all take no fields and only read telemetry back
+# (PWR added with the /power page, 2026-10-03; WPT/GRT/MED added with
+# /control's GPS map, 2026-10-05), so none of them can affect the robot --
 # every other sentence type (STP, DRV, NAV, MOD, PID, CAM...) is refused
 # for that role regardless of what the client sends.
-VIEWER_ALLOWED_COMMANDS = {"STA"}
+VIEWER_ALLOWED_COMMANDS = {"STA", "PWR", "WPT", "GRT", "MED"}
 
 
 def _command_type(command):
@@ -102,6 +116,23 @@ def _list_media(directory, extensions):
     if not os.path.isdir(directory):
         return []
     return sorted(f for f in os.listdir(directory) if f.lower().endswith(extensions))
+
+
+def _clear_media_thumb_cache():
+    """Wipes MEDIA_THUMB_CACHE_DIR (see its own comment above) -- called
+    every time /control is (re)loaded, per explicit user request ("sur la
+    pi2 c'est dans un fichier tmp qui se supprime au rafraichissement de
+    la page"): this is a short-lived cache for whatever's currently
+    hoverable on the map, not a permanent store, so clearing it on every
+    page load keeps it from ever growing unbounded or outliving the DB
+    rows/files it mirrors on Pi #1."""
+    if not os.path.isdir(MEDIA_THUMB_CACHE_DIR):
+        return
+    for name in os.listdir(MEDIA_THUMB_CACHE_DIR):
+        try:
+            os.remove(os.path.join(MEDIA_THUMB_CACHE_DIR, name))
+        except OSError:
+            pass  # already gone, or not a plain file -- fine, not worth failing the page load over
 
 
 def _page(title, body):
@@ -292,40 +323,24 @@ def _login_page(next_url, error=None):
 </html>"""
 
 
-def _control_page(videos=None, images=None, role="admin"):
+def _control_page(role="admin"):
     """Robot control page (landing page after login): clock fixed top-right,
-    center split into three panels flowing left to right (Controls -- still
-    a placeholder / Video feed / Images), bottom third is a terminal-style
-    console. The rightmost panel (Images) is shortened with a top margin so
-    it doesn't visually collide with the clock above it. No backend wired in
-    yet -- the robot communication protocol is still to be defined (see the
-    report's "A suivre" section), so the console just echoes what you type.
+    main area is the Controls panel (still a placeholder), bottom third is
+    a terminal-style console. No backend wired in yet -- the robot
+    communication protocol is still to be defined (see the report's "A
+    suivre" section), so the console just echoes what you type.
 
-    videos: filenames in media/videos/, played one at a time in a loop --
-    a single <video> element whose source is advanced to the next file
-    (client-side JS) when the current one ends, wrapping back to the first
-    after the last. Muted by default, native controls let sound be turned
-    on manually.
-    images: filenames in media/images/, cycled automatically every 3s as a
-    slideshow (client-side JS).
+    The Video feed / Images panels that used to live inline in this page
+    moved out to their own /media page on 2026-10-05 (see _media_page
+    below and the "Media" nav link) so this page stays focused on driving
+    the robot.
+
     role: "admin" (full access) or "viewer" (read-only guest account, see
     WEBSERVER_VIEWER_USERNAME above) -- a viewer never sees the Controls
     buttons or gets a usable console input, so there is no client-side way
     to type or trigger a driving command; /api/send enforces the same
     restriction server-side regardless, so this is a UX nicety, not the
-    actual security boundary.
-
-    Video feed panel: the client-side JS also tries to load the robot's
-    live camera feed (proxied from Pi #1 through /media/camera, see that
-    route below) into a hidden <img>. As soon as it loads, it's shown in
-    place of the recorded video playlist/placeholder; if it errors out
-    (robot's camera script not running, wrong IP...) the recorded
-    playlist/placeholder is shown instead, and the camera is retried every
-    few seconds in the background -- so the panel switches over
-    automatically whenever the live feed becomes available, no reload
-    needed."""
-    videos = videos or []
-    images = images or []
+    actual security boundary."""
     is_viewer = role == "viewer"
 
     if is_viewer:
@@ -346,20 +361,6 @@ def _control_page(videos=None, images=None, role="admin"):
       <span class="prompt">&gt;</span>
       <input id="consoleInput" type="text" placeholder="Type a command and press Enter" autocomplete="off">
 """
-
-    if videos:
-        video_urls_js = ", ".join(f'"{url_for("media_video", filename=v)}"' for v in videos)
-        video_html = '<video class="video-player" id="videoPlayer" muted controls playsinline></video>'
-    else:
-        video_urls_js = ""
-        video_html = '<div class="placeholder">Live video coming soon<br>(drop files into media/videos/)</div>'
-
-    if images:
-        image_urls_js = ", ".join(f'"{url_for("media_image", filename=i)}"' for i in images)
-        images_html = '<img class="slideshow-img" id="slideshowImg" alt="Robot snapshot">'
-    else:
-        image_urls_js = ""
-        images_html = '<div class="placeholder">Snapshots coming soon<br>(drop files into media/images/)</div>'
 
     return f"""<!doctype html>
 <html lang="en">
@@ -489,9 +490,6 @@ def _control_page(videos=None, images=None, role="admin"):
     }}
     .panel:first-child {{ border-left: none; }}
 
-    /* Rightmost panel (Images): shortened so it clears the clock above it. */
-    .panel.panel-right {{ margin-top: 64px; }}
-
     .panel h2 {{
       font-size: 13px;
       text-transform: uppercase;
@@ -515,42 +513,89 @@ def _control_page(videos=None, images=None, role="admin"):
       line-height: 1.6;
     }}
 
-    /* Video panel: one video at a time, auto-advances through the whole
-       set on a loop (see script below). Muted by default, native controls
-       let sound be turned on manually. */
-    .video-player {{
-      max-width: 100%;
-      max-height: 100%;
-      border-radius: 8px;
-      background: #000;
+    /* GPS map panel (2026-10-05): overrides .panel's own center/center
+       alignment (meant for a single centered placeholder) so the map
+       actually fills the panel instead of shrinking to its own size. */
+    .panel-map {{
+      align-items: stretch;
+      justify-content: flex-start;
     }}
-
-    /* Video feed panel wrapper: holds either the live camera image or the
-       recorded video/placeholder, never both at once (see script below). */
-    .video-feed-area {{
+    .map-wrap {{
+      position: relative;
       width: 100%;
       height: 100%;
+      min-height: 0;
       display: flex;
-      align-items: center;
-      justify-content: center;
+      flex-direction: column;
+      gap: 8px;
     }}
-
-    /* Live camera feed, proxied from the robot through /media/camera.
-       Hidden by default -- shown only once it actually loads. */
-    .camera-stream {{
-      max-width: 100%;
-      max-height: 100%;
+    /* Light background on purpose: the map is a plain lat/lon scatter
+       plot (a grid, not real map tiles -- this robot operates outdoors
+       without a reliable data connection, so no OpenStreetMap/Leaflet
+       tile fetch), and a light surface reads more like "paper/plotted
+       map" than the page's own dark chrome around it. */
+    .gps-map {{
+      flex: 1;
+      min-height: 0;
+      width: 100%;
+      background: #eef0f2;
+      background-image:
+        linear-gradient(to right, #dde1e6 1px, transparent 1px),
+        linear-gradient(to bottom, #dde1e6 1px, transparent 1px);
+      background-size: 40px 40px;
       border-radius: 8px;
-      object-fit: contain;
     }}
-    .camera-stream[hidden] {{ display: none; }}
+    .map-legend {{
+      flex: 0 0 auto;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 14px;
+      font-size: 11px;
+      color: #8b949e;
+    }}
+    .map-legend span {{ display: inline-flex; align-items: center; gap: 5px; }}
+    .map-dot {{
+      display: inline-block;
+      width: 9px;
+      height: 9px;
+      border-radius: 50%;
+      border: 1px solid #1b1f24;
+    }}
+    .map-dot-robot {{ background: #3fb950; }}
+    .map-dot-waypoint {{ background: #58a6ff; }}
+    .map-dot-route {{ background: #f85149; }}
+    .map-dot-media {{ background: #8957e5; }}
 
-    /* Images panel: single <img>, source swapped every 3s by JS below. */
-    .slideshow-img {{
-      max-width: 100%;
-      max-height: 100%;
-      border-radius: 8px;
-      object-fit: contain;
+    /* Hover tooltip: floats over the map at the cursor position (see the
+       script below) -- pointer-events:none so it can never itself be the
+       thing the mouse is "over", which would otherwise flicker the
+       underlying marker's mouseleave on and off. */
+    .map-tooltip {{
+      position: absolute;
+      pointer-events: none;
+      max-width: 240px;
+      background: #161b22;
+      border: 1px solid #30363d;
+      border-radius: 6px;
+      padding: 8px 10px;
+      font-size: 12px;
+      line-height: 1.5;
+      color: #e6edf3;
+      z-index: 20;
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+    }}
+    .map-tooltip-thumb {{
+      display: block;
+      margin-top: 6px;
+      max-width: 220px;
+      max-height: 160px;
+      border-radius: 4px;
+      background: #000;
+    }}
+    .map-tooltip-note {{
+      margin-top: 6px;
+      color: #8b949e;
+      font-style: italic;
     }}
 
     /* Console: bottom third of the window. min-height: 0 overrides the
@@ -770,6 +815,8 @@ def _control_page(videos=None, images=None, role="admin"):
 <body>
 
   <div class="nav">
+    <a href="{url_for('power')}">Power</a>
+    <a href="{url_for('media')}">Media</a>
     <a href="{url_for('pages_index')}">Pages</a>
     <a href="{url_for('logout')}">Log out</a>
     {'<span class="viewer-badge">Read-only access</span>' if is_viewer else ''}
@@ -814,16 +861,18 @@ def _control_page(videos=None, images=None, role="admin"):
       <h2>Controls</h2>
       {controls_html}
     </div>
-    <div class="panel">
-      <h2>Video feed</h2>
-      <div class="video-feed-area">
-        <img class="camera-stream" id="cameraStream" alt="Live camera feed" hidden>
-        <div id="recordedVideoArea">{video_html}</div>
+    <div class="panel panel-map">
+      <h2>Map</h2>
+      <div class="map-wrap">
+        <svg id="gpsMap" class="gps-map" viewBox="0 0 400 400" preserveAspectRatio="xMidYMid meet"></svg>
+        <div class="map-tooltip" id="mapTooltip" hidden></div>
+        <div class="map-legend">
+          <span><i class="map-dot map-dot-robot"></i>Robot</span>
+          <span><i class="map-dot map-dot-waypoint"></i>Waypoints</span>
+          <span><i class="map-dot map-dot-route"></i>NAV / GPS Driving</span>
+          <span><i class="map-dot map-dot-media"></i>Photos / Videos</span>
+        </div>
       </div>
-    </div>
-    <div class="panel panel-right">
-      <h2>Images</h2>
-      {images_html}
     </div>
   </div>
 
@@ -910,6 +959,17 @@ def _control_page(videos=None, images=None, role="admin"):
     // *all* communication, including the background status-bar polling
     // below -- and additionally to the visible Console tab (logLine) only
     // when logToConsole is true, i.e. for commands the user actually typed.
+    // GPS map (2026-10-05): the last NAV sentence sent from this console
+    // (manually typed, or via the "Distance + angle" panel below), kept
+    // client-side only and reset on page reload -- there is no server-
+    // side record of "the last manual NAV" (STA.target already reflects
+    // whatever's currently being chased, which an active route also
+    // overwrites), so the map's red "NAV sent" marker is tracked here
+    // instead, the moment a NAV actually succeeds. See sendToRobot()
+    // below (where it's set) and pollMap() further down (where it's
+    // read).
+    let lastNavSent = null;
+
     async function sendToRobot(command, {{logToConsole = false}} = {{}}) {{
       let data;
       try {{
@@ -940,6 +1000,17 @@ def _control_page(videos=None, images=None, role="admin"):
       if (logToConsole) {{
         logLine(cmdText, "cmd");
         logLine(resultText, resultCls);
+      }}
+
+      if (data.ok && command.trim().toUpperCase().startsWith("NAV,")) {{
+        const parts = command.split(",").map((p) => p.trim());
+        if (parts.length === 5) {{
+          const navLat = nmeaToDecimal(parts[1], parts[2]);
+          const navLon = nmeaToDecimal(parts[3], parts[4]);
+          if (navLat !== null) {{
+            lastNavSent = {{lat: navLat, lon: navLon, sentAt: Math.floor(Date.now() / 1000)}};
+          }}
+        }}
       }}
 
       return data;
@@ -1129,6 +1200,224 @@ def _control_page(videos=None, images=None, role="admin"):
     }}
     pollStatus();
     setInterval(pollStatus, 3000);
+
+    // GPS map (2026-10-05): plots Robot (green, live STA position),
+    // Waypoints (blue, WPT -- gamepad's X button, joined by thin segments
+    // in save order), NAV sent + GPS Driving (red, both grouped under one
+    // colour -- the last manual NAV from this console and the currently
+    // active GRT route), and Photos/Videos (violet, MED -- geotagged
+    // camera snapshots/recordings still present on Pi #1's camera
+    // process). A plain lat/lon scatter plot on a grid, not real map
+    // tiles (this robot operates outdoors without a reliable data
+    // connection) -- see pages/protocole_controle.html for the WPT/GRT/
+    // MED sentence formats this decodes.
+    const gpsMapSvg = document.getElementById("gpsMap");
+    const mapTooltip = document.getElementById("mapTooltip");
+    const MAP_NS = "http://www.w3.org/2000/svg";
+    const MAP_VIEW_SIZE = 400;
+    const MAP_COLORS = {{robot: "#3fb950", waypoint: "#58a6ff", route: "#f85149", media: "#8957e5"}};
+
+    // Builds a (lat, lon) -> [x, y] projection fit to `points`' own
+    // bounding box, in MAP_VIEW_SIZE x MAP_VIEW_SIZE viewBox units -- this
+    // is the "zoom adjusts to the points" requirement: there is no fixed
+    // scale, every redraw re-fits to whatever's currently known. A
+    // degenerate box (0 or 1 distinct positions) gets a small fixed-size
+    // padding instead of a zero-size span, which would otherwise divide
+    // by zero.
+    function projectPoints(points) {{
+      const lats = points.map((p) => p.lat);
+      const lons = points.map((p) => p.lon);
+      let minLat = Math.min(...lats), maxLat = Math.max(...lats);
+      let minLon = Math.min(...lons), maxLon = Math.max(...lons);
+      const PAD_DEG = 0.0002; // roughly 20m at mid-latitudes
+      if (maxLat - minLat < PAD_DEG) {{ minLat -= PAD_DEG; maxLat += PAD_DEG; }}
+      if (maxLon - minLon < PAD_DEG) {{ minLon -= PAD_DEG; maxLon += PAD_DEG; }}
+      const latSpan = maxLat - minLat;
+      const lonSpan = maxLon - minLon;
+      const margin = MAP_VIEW_SIZE * 0.08; // keeps an edge point's marker fully visible, not clipped
+      const usable = MAP_VIEW_SIZE - margin * 2;
+      return (lat, lon) => [
+        margin + ((lon - minLon) / lonSpan) * usable,
+        // Latitude increases northward, SVG y increases downward -- flip.
+        margin + (1 - (lat - minLat) / latSpan) * usable,
+      ];
+    }}
+
+    function clearMap() {{
+      while (gpsMapSvg.firstChild) gpsMapSvg.removeChild(gpsMapSvg.firstChild);
+    }}
+
+    function hideMapTooltip() {{
+      mapTooltip.hidden = true;
+      mapTooltip.innerHTML = "";
+    }}
+
+    function positionMapTooltip(evt) {{
+      const wrap = gpsMapSvg.closest(".map-wrap").getBoundingClientRect();
+      mapTooltip.style.left = (evt.clientX - wrap.left + 14) + "px";
+      mapTooltip.style.top = (evt.clientY - wrap.top + 14) + "px";
+    }}
+
+    function showMapTooltip(evt, data) {{
+      let html = `<strong>${{escapeHtml(data.label)}}</strong><br>${{data.lat.toFixed(5)}}°, ${{data.lon.toFixed(5)}}°`;
+      if (data.ts) {{
+        html += `<br>${{new Date(data.ts * 1000).toLocaleString()}}`;
+      }} else if (data.noTimestamp) {{
+        html += "<br>no timestamp available";
+      }}
+      mapTooltip.innerHTML = html;
+      mapTooltip.hidden = false;
+      if (data.media) {{
+        // Lazy: only actually downloaded from Pi #1 once hovered (see
+        // /media/thumb/<kind>/<filename> -- cached in a tmp folder on
+        // Pi #2 for the rest of this page view, cleared on next reload).
+        const isVideo = data.media.kind === "video";
+        const thumb = document.createElement(isVideo ? "video" : "img");
+        thumb.className = "map-tooltip-thumb";
+        thumb.src = `/media/thumb/${{data.media.kind}}/${{encodeURIComponent(data.media.filename)}}`;
+        if (isVideo) {{
+          thumb.muted = true;
+          thumb.preload = "metadata";
+          // Explicit user request: never actually play the video here --
+          // seeking to a tiny offset once metadata loads renders that one
+          // frame as a static image, with .play() never called.
+          thumb.addEventListener("loadedmetadata", () => {{ thumb.currentTime = 0.1; }});
+        }}
+        thumb.addEventListener("error", () => {{
+          const note = document.createElement("div");
+          note.className = "map-tooltip-note";
+          note.textContent = "file no longer available (rotated out on Pi #1)";
+          mapTooltip.appendChild(note);
+        }});
+        mapTooltip.appendChild(thumb);
+      }}
+      positionMapTooltip(evt);
+    }}
+
+    function addMapCircle(x, y, radius, data) {{
+      const circle = document.createElementNS(MAP_NS, "circle");
+      circle.setAttribute("cx", x);
+      circle.setAttribute("cy", y);
+      circle.setAttribute("r", radius);
+      circle.setAttribute("fill", data.color);
+      circle.setAttribute("stroke", "#1b1f24");
+      circle.setAttribute("stroke-width", "1");
+      circle.style.cursor = "pointer";
+      circle.addEventListener("mouseenter", (evt) => showMapTooltip(evt, data));
+      circle.addEventListener("mousemove", positionMapTooltip);
+      circle.addEventListener("mouseleave", hideMapTooltip);
+      gpsMapSvg.appendChild(circle);
+    }}
+
+    function addMapLine(x1, y1, x2, y2, color) {{
+      const line = document.createElementNS(MAP_NS, "line");
+      line.setAttribute("x1", x1);
+      line.setAttribute("y1", y1);
+      line.setAttribute("x2", x2);
+      line.setAttribute("y2", y2);
+      line.setAttribute("stroke", color);
+      line.setAttribute("stroke-width", "1.5");
+      line.setAttribute("stroke-opacity", "0.6");
+      gpsMapSvg.insertBefore(line, gpsMapSvg.firstChild); // behind every point marker
+    }}
+
+    // Decodes WPT/GRT's shared "count, then count*4 fields
+    // (lat,lat_dir,lon,lon_dir)" shape into plain {{lat, lon}} pairs.
+    function decodeLatLonList(fields) {{
+      const out = [];
+      if (!fields || fields.length < 1) return out;
+      const count = parseInt(fields[0], 10) || 0;
+      for (let i = 0; i < count; i++) {{
+        const [lat, latDir, lon, lonDir] = fields.slice(1 + i * 4, 5 + i * 4);
+        const dLat = nmeaToDecimal(lat, latDir);
+        const dLon = nmeaToDecimal(lon, lonDir);
+        if (dLat !== null) out.push({{lat: dLat, lon: dLon}});
+      }}
+      return out;
+    }}
+
+    let mapPollBusy = false;
+    async function pollMap() {{
+      if (mapPollBusy) return;
+      mapPollBusy = true;
+      try {{
+        const [staData, wptData, grtData, medData] = await Promise.all([
+          sendToRobot("STA"), sendToRobot("WPT"), sendToRobot("GRT"), sendToRobot("MED"),
+        ]);
+
+        const points = [];
+
+        if (staData.ok && staData.fields && staData.fields.length >= 4) {{
+          const [lat, latDir, lon, lonDir] = staData.fields;
+          const curLat = nmeaToDecimal(lat, latDir);
+          const curLon = nmeaToDecimal(lon, lonDir);
+          if (curLat !== null && (curLat !== 0 || curLon !== 0)) {{
+            points.push({{lat: curLat, lon: curLon, color: MAP_COLORS.robot, radius: 6, label: "Robot"}});
+          }}
+        }}
+
+        const waypointPts = wptData.ok ? decodeLatLonList(wptData.fields) : [];
+        waypointPts.forEach((p, i) => {{
+          points.push({{
+            lat: p.lat, lon: p.lon, color: MAP_COLORS.waypoint, radius: 4,
+            label: `Waypoint ${{i + 1}}`, noTimestamp: true,
+          }});
+        }});
+
+        if (grtData.ok) {{
+          decodeLatLonList(grtData.fields).forEach((p, i) => {{
+            points.push({{
+              lat: p.lat, lon: p.lon, color: MAP_COLORS.route, radius: 4,
+              label: `GPS Driving ${{i + 1}}`, noTimestamp: true,
+            }});
+          }});
+        }}
+
+        if (lastNavSent) {{
+          points.push({{
+            lat: lastNavSent.lat, lon: lastNavSent.lon, color: MAP_COLORS.route, radius: 5,
+            label: "NAV sent", ts: lastNavSent.sentAt,
+          }});
+        }}
+
+        if (medData.ok && medData.fields && medData.fields.length >= 1) {{
+          const count = parseInt(medData.fields[0], 10) || 0;
+          for (let i = 0; i < count; i++) {{
+            const [filename, kind, lat, latDir, lon, lonDir, ts] = medData.fields.slice(1 + i * 7, 8 + i * 7);
+            const dLat = nmeaToDecimal(lat, latDir);
+            const dLon = nmeaToDecimal(lon, lonDir);
+            if (dLat === null) continue;
+            points.push({{
+              lat: dLat, lon: dLon, color: MAP_COLORS.media, radius: 4,
+              label: kind === "VID" ? "Video" : "Photo",
+              ts: parseInt(ts, 10) || null,
+              media: {{filename, kind: kind === "VID" ? "video" : "photo"}},
+            }});
+          }}
+        }}
+
+        clearMap();
+        if (points.length === 0) return;
+        const project = projectPoints(points);
+
+        for (let i = 0; i + 1 < waypointPts.length; i++) {{
+          const [x1, y1] = project(waypointPts[i].lat, waypointPts[i].lon);
+          const [x2, y2] = project(waypointPts[i + 1].lat, waypointPts[i + 1].lon);
+          addMapLine(x1, y1, x2, y2, MAP_COLORS.waypoint);
+        }}
+
+        for (const p of points) {{
+          const [x, y] = project(p.lat, p.lon);
+          addMapCircle(x, y, p.radius, p);
+        }}
+      }} catch (err) {{
+        // Silent on failure, same spirit as pollStatus() above.
+      }} finally {{
+        mapPollBusy = false;
+      }}
+    }}
+    pollMap();
+    setInterval(pollMap, 5000);
 
     // Controls panel: one full-width button per command a human actually
     // needs a shortcut for (see pages/protocole_controle.html for the
@@ -1378,6 +1667,228 @@ def _control_page(videos=None, images=None, role="admin"):
       }}
     }}
 
+  </script>
+
+</body>
+</html>"""
+
+
+def _media_page(videos=None, images=None, role="admin"):
+    """Media page: video playlist (loops through media/videos/) + live
+    camera feed (falls back to the playlist when the feed errors out) +
+    images slideshow (media/images/, swapped every 3s). Split out of
+    /control on 2026-10-05 (explicit user request -- the Media page/link
+    had gone missing when /control's inline Video feed/Images panels were
+    restored from a stale local copy, so it's rebuilt here as its own
+    page rather than nested back inside /control) so /control stays
+    focused on driving the robot.
+
+    videos / images: filenames in media/videos/ and media/images/ (see
+    _list_media above). role: "admin" or "viewer" -- same meaning as in
+    _control_page, used only to show the read-only badge here since this
+    page has no controls to disable.
+
+    The live camera feed is proxied from Pi #1 through /media/camera (see
+    that route below) into a hidden <img>. As soon as it loads, it's shown
+    in place of the recorded video playlist/placeholder; if it errors out
+    (robot's camera script not running, wrong IP...) the recorded
+    playlist/placeholder is shown instead, and the camera is retried every
+    few seconds in the background -- so the panel switches over
+    automatically whenever the live feed becomes available, no reload
+    needed."""
+    videos = videos or []
+    images = images or []
+    is_viewer = role == "viewer"
+
+    if videos:
+        video_urls_js = ", ".join(f'"{url_for("media_video", filename=v)}"' for v in videos)
+        video_html = '<video class="video-player" id="videoPlayer" muted controls playsinline></video>'
+    else:
+        video_urls_js = ""
+        video_html = '<div class="placeholder">Live video coming soon<br>(drop files into media/videos/)</div>'
+
+    if images:
+        image_urls_js = ", ".join(f'"{url_for("media_image", filename=i)}"' for i in images)
+        images_html = '<img class="slideshow-img" id="slideshowImg" alt="Robot snapshot">'
+    else:
+        image_urls_js = ""
+        images_html = '<div class="placeholder">Snapshots coming soon<br>(drop files into media/images/)</div>'
+
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Robot Media</title>
+  <style>
+    :root {{ color-scheme: dark; }}
+    * {{ box-sizing: border-box; }}
+    html, body {{ height: 100%; margin: 0; }}
+    body {{
+      display: flex;
+      flex-direction: column;
+      background: #0d1117;
+      color: #e6edf3;
+      font-family: system-ui, sans-serif;
+    }}
+
+    .nav {{
+      position: fixed;
+      top: 16px;
+      left: 20px;
+      display: flex;
+      gap: 14px;
+      font-size: 13px;
+      z-index: 10;
+    }}
+    .nav a {{ color: #8b949e; text-decoration: none; }}
+    .nav a:hover {{ color: #e6edf3; }}
+    .viewer-badge {{
+      color: #d29922;
+      border: 1px solid #6e5b1f;
+      background: #3a2f0f;
+      padding: 1px 8px;
+      border-radius: 10px;
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }}
+
+    .clock {{
+      position: fixed;
+      top: 16px;
+      right: 20px;
+      font-family: "Courier New", monospace;
+      font-size: 14px;
+      color: #8b949e;
+      background: #161b22;
+      border: 1px solid #30363d;
+      padding: 6px 12px;
+      border-radius: 6px;
+      z-index: 10;
+      letter-spacing: 0.05em;
+    }}
+
+    .main-area {{
+      flex: 1;
+      display: flex;
+      flex-direction: row;
+      margin-top: 72px;
+      min-height: 0;
+      padding-bottom: 24px;
+    }}
+
+    .panel {{
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+      min-height: 0;
+    }}
+    .panel:first-child {{ border-right: 1px solid #30363d; }}
+
+    .panel h2 {{
+      font-size: 13px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: #8b949e;
+      margin: 0 0 10px;
+    }}
+
+    .panel .placeholder {{
+      border: 1px dashed #30363d;
+      border-radius: 8px;
+      width: 100%;
+      height: 100%;
+      min-height: 200px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 13px;
+      color: #484f58;
+      text-align: center;
+      padding: 12px;
+      line-height: 1.6;
+    }}
+
+    /* Video panel: one video at a time, auto-advances through the whole
+       set on a loop (see script below). Muted by default, native controls
+       let sound be turned on manually. */
+    .video-player {{
+      max-width: 100%;
+      max-height: 100%;
+      border-radius: 8px;
+      background: #000;
+    }}
+
+    /* Video feed panel wrapper: holds either the live camera image or the
+       recorded video/placeholder, never both at once (see script below). */
+    .video-feed-area {{
+      width: 100%;
+      height: 100%;
+      min-height: 200px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }}
+
+    /* Live camera feed, proxied from the robot through /media/camera.
+       Hidden by default -- shown only once it actually loads. */
+    .camera-stream {{
+      max-width: 100%;
+      max-height: 100%;
+      border-radius: 8px;
+      object-fit: contain;
+    }}
+    .camera-stream[hidden] {{ display: none; }}
+
+    /* Images panel: single <img>, source swapped every 3s by JS below. */
+    .slideshow-img {{
+      max-width: 100%;
+      max-height: 100%;
+      border-radius: 8px;
+      object-fit: contain;
+    }}
+  </style>
+</head>
+<body>
+
+  <div class="nav">
+    <a href="{url_for('control')}">Control</a>
+    <a href="{url_for('power')}">Power</a>
+    <a href="{url_for('pages_index')}">Pages</a>
+    <a href="{url_for('logout')}">Log out</a>
+    {'<span class="viewer-badge">Read-only access</span>' if is_viewer else ''}
+  </div>
+  <div class="clock" id="clock">--:--:--</div>
+
+  <div class="main-area">
+    <div class="panel">
+      <h2>Video feed</h2>
+      <div class="video-feed-area">
+        <img class="camera-stream" id="cameraStream" alt="Live camera feed" hidden>
+        <div id="recordedVideoArea">{video_html}</div>
+      </div>
+    </div>
+    <div class="panel">
+      <h2>Images</h2>
+      {images_html}
+    </div>
+  </div>
+
+  <script>
+    function pad(n) {{ return String(n).padStart(2, "0"); }}
+
+    function updateClock() {{
+      const now = new Date();
+      document.getElementById("clock").textContent =
+        `${{pad(now.getHours())}}:${{pad(now.getMinutes())}}:${{pad(now.getSeconds())}}`;
+    }}
+    updateClock();
+    setInterval(updateClock, 1000);
+
     // Video playlist: one video at a time, auto-advances to the next when
     // the current one ends, wrapping back to the first after the last.
     const playlistVideos = [{video_urls_js}];
@@ -1451,9 +1962,30 @@ def _control_page(videos=None, images=None, role="admin"):
 @app.route("/control")
 @login_required
 def control():
+    _clear_media_thumb_cache()
+    return _control_page(role=session.get("role", "admin"))
+
+
+@app.route("/media")
+@login_required
+def media():
     videos = _list_media(VIDEOS_DIR, VIDEO_EXTENSIONS)
     images = _list_media(IMAGES_DIR, IMAGE_EXTENSIONS)
-    return _control_page(videos, images, role=session.get("role", "admin"))
+    return _media_page(videos, images, role=session.get("role", "admin"))
+
+
+@app.route("/power")
+@login_required
+def power():
+    """Dedicated solar/battery/load monitoring page (pages/power.html):
+    polls the robot's PWR sentence through /api/send every few seconds,
+    same read-only spirit as /control's status bar (see PWR in
+    VIEWER_ALLOWED_COMMANDS above -- a viewer account can load this page
+    too, it just can't reach anything that drives the robot). Served as a
+    static file straight from pages/ (no f-string page like _control_page
+    needed) since all of its state comes from client-side polling, same
+    reasoning as serve_page() below for the other pages/ files."""
+    return send_from_directory(PAGES_DIR, "power.html")
 
 
 @app.route("/api/send", methods=["POST"])
@@ -1479,6 +2011,29 @@ def api_send():
 
     result = send_command(command, ROBOT_HOST, ROBOT_PORT)
     return jsonify(result)
+
+
+@app.route("/api/power_history")
+@login_required
+def api_power_history():
+    """Read-only, like PWR/STA via /api/send above -- no role check needed,
+    a viewer can see historical charts same as the live gauges. `period`
+    is "day" or "month" (case-insensitive); fetch_power_history() loops
+    over Pi #1's paginated HIS response (see power_history_client.py and
+    link/power_history.py) and returns the assembled rows as JSON.
+
+    2026-10-05: /power's history section charts battery_soc only for now
+    (see pages/power.html) -- the other indicators are already being
+    logged on Pi #1 and available in this same response, just not drawn
+    yet; this endpoint intentionally returns every field rather than
+    only battery_soc so a later chart can be added here without any
+    backend change."""
+    period = (request.args.get("period") or "day").strip().upper()
+    try:
+        rows = fetch_power_history(period, ROBOT_HOST, ROBOT_PORT)
+    except PowerHistoryError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 502
+    return jsonify({"ok": True, "period": period, "rows": rows})
 
 
 @app.route("/media/camera")
@@ -1530,6 +2085,65 @@ def media_image(filename):
     if not filename.lower().endswith(IMAGE_EXTENSIONS):
         abort(404)
     return send_from_directory(IMAGES_DIR, filename)
+
+
+@app.route("/media/thumb/<kind>/<path:filename>")
+@login_required
+def media_thumb(kind, filename):
+    """Proxies+caches one geotagged photo/video for /control's GPS map
+    (the violet markers' hover thumbnail) -- these files live on Pi #1's
+    camera process (camera/stream_server.py), not in MEDIA_DIR above, and
+    are reachable at GET /snapshots/<filename> or /recordings/<filename>
+    there (see that module and link/server.py's MED sentence, which is
+    how this page learns these filenames/positions exist in the first
+    place).
+
+    2026-10-05 (explicit user request): the file is downloaded to Pi #2
+    ONLY on demand -- the two Pis must actually be in contact -- and
+    cached in MEDIA_THUMB_CACHE_DIR rather than re-fetched on every hover;
+    that cache is wiped every time /control is (re)loaded (see
+    _clear_media_thumb_cache()/control() above), so hovering the same
+    point twice within one page view reuses the cached copy, but nothing
+    here is kept across page loads.
+
+    `kind` is "photo" or "video" (matches MED's SNAP/VID field, decoded by
+    the page's own JS) and picks which of the camera process's two capped
+    file stores to fetch from -- a filename is only unique within its own
+    store, not across both, so the kind must come along with it."""
+    if kind == "photo":
+        remote_path, content_type = "/snapshots/", "image/jpeg"
+    elif kind == "video":
+        remote_path, content_type = "/recordings/", "video/mp4"
+    else:
+        abort(404)
+
+    # filename only ever becomes a local cache-file name and one path
+    # segment of a trusted upstream URL below -- reject anything that
+    # isn't the plain "one segment, no traversal" shape camera/
+    # snapshots.py's/recordings.py's own filenames always have (same
+    # defense-in-depth as their own _handle_file(), which additionally
+    # validates against their live listing -- this proxy doesn't need to
+    # duplicate that check, a wrong/stale name just 404s via the upstream
+    # request below).
+    if not filename or "/" in filename or filename in (".", ".."):
+        abort(404)
+
+    os.makedirs(MEDIA_THUMB_CACHE_DIR, exist_ok=True)
+    cache_name = f"{kind}_{filename}"
+    cache_path = os.path.join(MEDIA_THUMB_CACHE_DIR, cache_name)
+
+    if not os.path.isfile(cache_path):
+        url = f"http://{ROBOT_HOST}:{CAMERA_PORT}{remote_path}{filename}"
+        try:
+            upstream = requests.get(url, timeout=CAMERA_TIMEOUT)
+        except requests.exceptions.RequestException:
+            abort(502)
+        if upstream.status_code != 200:
+            abort(404)
+        with open(cache_path, "wb") as f:
+            f.write(upstream.content)
+
+    return send_from_directory(MEDIA_THUMB_CACHE_DIR, cache_name, mimetype=content_type)
 
 
 @app.route("/login", methods=["GET", "POST"])
@@ -1603,7 +2217,14 @@ def pages_index():
     if not os.path.isdir(PAGES_DIR):
         return _page("Robot web server", "<p>pages/ folder not found.</p>"), 500
 
-    files = sorted(f for f in os.listdir(PAGES_DIR) if f.lower().endswith(".html"))
+    # power.html excluded (2026-10-05, explicit user request): it's a
+    # dashboard, not a doc, and is already reachable from /control's own
+    # nav link plus its own "Pages"/"Explained" cross-links -- listing it
+    # here too was redundant.
+    files = sorted(
+        f for f in os.listdir(PAGES_DIR)
+        if f.lower().endswith(".html") and f != "power.html"
+    )
     if not files:
         list_html = "<p>No HTML pages in pages/ yet.</p>"
     else:

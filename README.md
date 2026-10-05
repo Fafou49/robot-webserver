@@ -220,6 +220,28 @@ l'intérieur au lieu d'agrandir la boîte (`min-height: 0` sur les
 conteneurs flex concernés — sans ça, un onglet qui se remplit pousse la
 boîte à grandir hors de l'écran plutôt que de rester en place).
 
+## Page Power (/power) — suivi solaire/batterie/charge
+
+Page autonome dédiée (lien "Power" dans le bandeau de navigation de
+`/control`), en lecture seule : elle interroge le robot toutes les 3
+secondes avec la trame `PWR` (sans champ, voir le dépôt `robot`,
+`link/tracer_reader.py` et la section "Liaison RS485 / Tracer" de son
+README) et affiche la tension/courant/puissance du panneau solaire, l'état
+de la batterie (tension, courant et puissance de charge, température,
+état de charge avec une jauge), la tension/courant/puissance de la charge
+en sortie, et la température interne du contrôleur EPever Tracer. Tant que
+le contrôleur n'a pas répondu avec succès au moins une fois (câble RS485
+débranché, module `ch343` non chargé...), les tuiles affichent "—" et le
+badge en haut à droite indique "Tracer unavailable" — la page continue
+d'interroger le robot en arrière-plan et se met à jour automatiquement dès
+que la liaison redevient disponible, sans recharger la page.
+
+Comme `/control`, cette page est servie derrière le login — le compte
+"invité" en lecture seule (voir plus haut) peut aussi l'ouvrir : `PWR`
+étant une trame de lecture seule sans aucun effet sur le robot, elle a été
+ajoutée à la liste des commandes autorisées pour ce rôle dans `app.py`
+(`VIEWER_ALLOWED_COMMANDS`), au même titre que `STA`.
+
 ## Caméra en direct (panneau "Video feed" de /control)
 
 Si une webcam est branchée sur le robot (Raspberry Pi n°1) et que son

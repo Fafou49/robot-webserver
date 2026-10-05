@@ -1,0 +1,889 @@
+<!-- power.html -- dedicated solar/battery/load monitoring page.
+     Redesigned 2026-10-03 after a round of design review: net power
+     balance dial (diverging, 0 W at the apex -- pv_power - load_power),
+     state of charge as a segmented status-color bar, battery voltage and
+     both temperatures as the same segmented status-gauge (real danger
+     zones), PV and load readings as stat tiles with a ~60s rolling
+     sparkline (pure flow quantities, no natural danger zone). Thresholds
+     below were explicitly confirmed by the user:
+       - battery voltage: 12V lead-acid/LiFePO4-ish system, 11.5 / 12.0 / 12.8 V
+       - battery temperature: 40 / 50 / 60 degC
+       - controller temperature: 45 / 55 / 65 degC
+       - net power balance: +/-100 W scale, pv_power - load_power formula
+         (assumes the robot's own electronics are wired through the
+         Tracer's LOAD output -- that's what makes load_power the right
+         "consumption" term here)
+     Net power balance tile also shows a "time until empty" countdown while
+     discharging (Consuming state only), based on a 35Ah battery (user-
+     confirmed capacity). Formula: discharge current (A) = |net power W| /
+     battery_voltage; remaining capacity (Ah) = (battery_soc / 100) * 35;
+     minutes = remaining capacity / discharge current * 60. This is a simple
+     instantaneous estimate (assumes the current draw stays constant and
+     ignores the battery's real discharge curve/Peukert effect) -- fine as a
+     rough heads-up, not a precision fuel gauge.
+
+     2026-10-05: all three temperatures (battery, controller, and the new
+     Pi #1 CPU temperature) are now grouped into one "Temperatures" panel
+     at the bottom-right, each drawn as a VERTICAL (thermometer-style)
+     segmented bar -- the user's chosen layout after comparing it against
+     a horizontal-bars alternative (see pages/power_explained.html).
+     cpu_temp comes from the robot repo's new link/cpu_temp.py (reads
+     /sys/class/thermal/thermal_zone0/temp on Pi #1) and, unlike the other
+     two, is NOT gated by the Tracer's `available` flag -- it's Pi #1's
+     own CPU, unrelated to whether the RS485/Tracer cable is plugged in.
+     Its thresholds (good<60/warning 60-70/serious 70-80/critical>=80 degC)
+     are a reasoned proposal (Raspberry Pi throttling behaviour), not yet
+     field-validated against this robot's actual enclosure/airflow --
+     adjust breaks:[60,70,80] below once real readings are in.
+
+     Still read-only: this page never sends a command that changes robot
+     state, it only polls PWR every few seconds, same spirit as /control's
+     STA polling.
+
+     2026-10-05: new "History" section -- two charts (Day: last 24h,
+     Month: last 30 days, both rolling windows) of battery state of
+     charge, one sample every 5 minutes. Backed by a new SQLite database
+     on Pi #1 (link/power_history.py), fetched here via GET
+     /api/power_history?period=day|month (see app.py and
+     power_history_client.py on this repo). The user explicitly scoped
+     the FIRST version of these charts to battery charge only ("les deux
+     graphes doivent prendre en compte la charge de la batterie dans un
+     premier temps") -- every other PWR indicator (voltages, currents,
+     powers, temperatures) is already being logged on Pi #1 and present
+     in this same API response, just not drawn yet; adding another chart
+     later needs no backend change, only another makeHistoryChart() call
+     below. GPS position is deliberately NOT charted here either
+     (explicit user instruction) -- it's still logged per sample (and
+     separately, CAM,SNAP snapshots are geotagged into the same
+     database) for future use, just not part of this view. Single series
+     per chart (battery_soc, %) needs no legend -- the chart title
+     already names it.
+
+     2026-10-05 (same day, layout pass): briefly moved History up into
+     the Battery column (right under its state-of-charge gauge) and
+     narrowed it to half width -- reverted the same day on user request
+     ("je souhaites toujours que les deux graphs soient en derniers... et
+     larges de tout l'écran"): History is back to a full-width section
+     below the whole dashboard, last on the page. What DID stay from that
+     pass: the dashboard itself is still two independent flex columns
+     instead of one CSS grid with named row-spanning areas (see the
+     .dashboard CSS comment) -- the old grid coupled the left column's
+     row heights to the right column's, which is what was pushing Solar
+     down against Balance's own box; two plain flex columns don't have
+     that coupling, and this is shorter overall than the original grid
+     even with History back to full width below it. Also dropped
+     power.html from the generic /pages listing (app.py) -- it's a
+     dashboard, reachable from /control's nav and its own cross-links,
+     not a doc to list there (this part stands, unrelated to the
+     History placement back-and-forth above).
+
+     Served by app.py's @app.route("/power") (static send_from_directory,
+     like the other pages/*.html files), behind the same @login_required
+     guard as /control. PWR is in VIEWER_ALLOWED_COMMANDS alongside STA, so
+     a read-only viewer account can load this page too.
+
+     /api/send CONTRACT (confirmed from the real app.py/robot_link.py):
+       POST /api/send  body: {"command": "PWR"}  -- bare sentence type, no
+         "$PROV," prefix/checksum (robot_link.build_sentence adds both).
+       Success: {"ok": true, "fields": [...14 strings...], "raw_response": "..."}
+         fields[0..12] = FIELD_ORDER below (cpu_temp is the 13th, index 12),
+         fields[13] = "1"/"0" available flag (Tracer only, see above).
+       Failure: {"ok": false, "error": "..."} -- robot unreachable or
+         answered ERR (e.g. link/server.py not yet updated to know PWR). -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Power — Robot</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --surface: #171a21;
+    --surface-raised: #1f232c;
+    --border: #2a2f3a;
+    --text-primary: #e8eaed;
+    --text-secondary: #9aa3b2;
+    --text-muted: #6b7280;
+    --accent: #4da3ff;
+    --status-critical: #d03b3b;
+    --status-serious:  #ec835a;
+    --status-warning:  #fab219;
+    --status-good:     #0ca30c;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text-primary);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+    padding: 12px 14px;
+    display: flex;
+    flex-direction: column;
+  }
+  .page-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin-bottom: 10px;
+    flex: 0 0 auto;
+  }
+  .page-header h1 { font-size: 18px; font-weight: 600; margin: 0; }
+  nav.top-nav a { color: var(--text-secondary); text-decoration: none; margin-right: 14px; font-size: 13px; }
+  nav.top-nav a:hover { color: var(--accent); }
+
+  .status-badge {
+    display: inline-flex; align-items: center; gap: 7px;
+    padding: 5px 11px; border-radius: 999px; font-size: 12px; font-weight: 600;
+    background: var(--surface-raised); border: 1px solid var(--border);
+  }
+  .status-badge .dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+  .status-badge.ok .dot { background: var(--status-good); box-shadow: 0 0 6px var(--status-good); }
+  .status-badge.ok { color: var(--status-good); }
+  .status-badge.down .dot { background: var(--status-critical); }
+  .status-badge.down { color: var(--status-critical); }
+
+  /* Two independent columns (2026-10-05, replacing the earlier
+     grid-template-areas layout): each column is its own flex stack,
+     sized purely by its own content. The previous named-area grid tied
+     "balance"/"solar" (left) to the SAME row tracks as "battery" (right,
+     spanning 2 rows) -- once History moved into the battery column
+     (see .area-history below) that column got taller than the left
+     one's matching rows, and the grid's auto-row sizing stretched the
+     shared rows to fit it, which is what pushed Solar down into
+     Balance's own box. Two plain flex columns have no such coupling:
+     each one is exactly as tall as its own content, and the whole
+     dashboard is just the taller of the two -- shorter overall than the
+     old layout now that History no longer needs its own full-width
+     strip below everything. Collapses to one column below 860px. */
+  .dashboard {
+    flex: 0 0 auto;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+    align-items: start;
+  }
+  .col { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+  @media (max-width: 860px) {
+    .dashboard { grid-template-columns: 1fr; }
+  }
+
+  .section-title {
+    font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em;
+    color: var(--text-muted); margin: 0 0 6px;
+  }
+
+  .tile-grid {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 2px; background: var(--border); border-radius: 10px; overflow: hidden; border: 1px solid var(--border);
+  }
+
+  /* --- flow stat tile (PV, Load): value + sparkline --- */
+  .stat-tile { background: var(--surface); padding: 9px 12px; min-width: 0; }
+  .stat-tile .label { font-size: 11px; color: var(--text-secondary); margin-bottom: 2px; }
+  .stat-tile .value { font-size: 19px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .stat-tile .value .unit { font-size: 12px; font-weight: 400; color: var(--text-secondary); margin-left: 3px; }
+  .stat-tile.stale .value { color: var(--text-muted); }
+  .stat-tile svg.spark { display: block; margin-top: 4px; overflow: visible; }
+  .stat-tile svg.spark path.line { fill: none; stroke: var(--text-muted); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+  .stat-tile svg.spark path.area { fill: var(--accent); opacity: 0.10; stroke: none; }
+  .stat-tile svg.spark circle.last { fill: var(--accent); }
+
+  /* --- status gauge tile (SOC, battery voltage, temperatures) --- */
+  .gauge-tile { background: var(--surface); padding: 9px 12px; min-width: 0; }
+  .gauge-tile.wide { grid-column: 1 / -1; }
+  .gauge-tile .label-row { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 5px; }
+  .gauge-tile .label { font-size: 11px; color: var(--text-secondary); }
+  .gauge-tile .value { font-size: 16px; font-weight: 600; font-variant-numeric: tabular-nums; transition: color 0.3s ease; }
+  .lcd-track { display: flex; gap: 2px; height: 13px; }
+  .lcd-seg { flex: 1; min-width: 2px; border-radius: 2px; background: var(--border); transition: background-color 0.2s ease; }
+
+  /* --- grouped temperatures panel: vertical (thermometer-style) gauge --- */
+  .vgauge-tile {
+    background: var(--surface); padding: 10px 6px 8px;
+    display: flex; flex-direction: column; align-items: center; gap: 6px; min-width: 0;
+  }
+  .vgauge-tile .label { font-size: 10.5px; color: var(--text-secondary); text-align: center; }
+  .vgauge-tile .value { font-size: 14px; font-weight: 600; font-variant-numeric: tabular-nums; transition: color 0.3s ease; }
+  .vlcd-track { display: flex; flex-direction: column-reverse; gap: 2px; width: 24px; height: 100px; }
+  .vlcd-seg { flex: 1; min-height: 2px; border-radius: 2px; background: var(--border); transition: background-color 0.2s ease; }
+
+  /* --- net power balance dial (diverging, 0 W at the apex) --- */
+  .balance-card {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+    padding: 10px; display: flex; justify-content: center; align-items: center; height: 100%;
+  }
+  .dial-wrap { display: flex; flex-direction: column; align-items: center; }
+  .dial-center { position: relative; }
+  .dial-center svg { display: block; width: 176px; height: 104px; }
+  .dial-value {
+    position: absolute; top: 52px; left: 0; width: 176px; text-align: center;
+    font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; transition: color 0.3s ease;
+  }
+  .dial-state {
+    position: absolute; top: 78px; left: 0; width: 176px; text-align: center;
+    font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-secondary); transition: color 0.3s ease;
+  }
+  .dial-ttf {
+    position: absolute; top: 93px; left: 0; width: 176px; text-align: center;
+    font-size: 10px; color: var(--text-muted); font-variant-numeric: tabular-nums;
+    opacity: 0; transition: opacity 0.3s ease;
+  }
+  .dial-ticks { display: flex; justify-content: space-between; width: 176px; margin-top: 2px; font-size: 10px; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+
+  /* --- history: full-width day/month trend charts, last on the page,
+     below the whole dashboard (reverted 2026-10-05 to this -- see the
+     file header note; a half-width version nested in the Battery column
+     was tried and explicitly rejected the same day). --- */
+  .history-section { flex: 0 0 auto; margin-top: 10px; }
+  .history-card {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+    padding: 10px 12px; margin-bottom: 10px;
+  }
+  .history-card-title { font-size: 12px; color: var(--text-secondary); margin-bottom: 6px; }
+  .history-card-title .unit { color: var(--text-muted); }
+  .history-chart-wrap { position: relative; }
+  .history-svg { display: block; width: 100%; height: 140px; overflow: visible; }
+  .history-svg .grid-line { stroke: var(--border); stroke-width: 1; }
+  .history-svg .grid-label { fill: var(--text-muted); font-size: 9px; }
+  .history-svg path.area { fill: var(--accent); opacity: 0.08; stroke: none; }
+  .history-svg path.line { fill: none; stroke: var(--accent); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+  .history-svg .hover-guide { stroke: var(--text-muted); stroke-width: 1; opacity: 0; }
+  .history-svg .hover-dot { fill: var(--accent); stroke: var(--surface); stroke-width: 1.5; opacity: 0; }
+  .history-xaxis {
+    display: flex; justify-content: space-between; font-size: 10px;
+    color: var(--text-muted); margin-top: 2px; font-variant-numeric: tabular-nums;
+  }
+  .history-tooltip {
+    position: absolute; top: 4px; pointer-events: none; opacity: 0;
+    background: var(--surface-raised); border: 1px solid var(--border); border-radius: 6px;
+    padding: 4px 8px; font-size: 11px; white-space: nowrap; transform: translateX(-50%);
+    transition: opacity 0.1s ease;
+  }
+  .history-tooltip .t-time { color: var(--text-muted); font-size: 10px; }
+  .history-tooltip .t-value { font-weight: 600; font-variant-numeric: tabular-nums; }
+  .history-empty { font-size: 12px; color: var(--text-muted); padding: 40px 0; text-align: center; }
+
+  .footer-note { margin-top: 8px; font-size: 11px; color: var(--text-muted); flex: 0 0 auto; }
+</style>
+</head>
+<body>
+
+  <div class="page-header">
+    <div>
+      <h1>Power — Solar / Battery / Load</h1>
+      <nav class="top-nav">
+        <a href="/control">&larr; Control page</a>
+        <a href="/pages">Pages</a>
+        <a href="/pages/protocole_controle.html">Protocol</a>
+        <a href="/pages/power_explained.html">Explained</a>
+      </nav>
+    </div>
+    <span id="statusBadge" class="status-badge down">
+      <span class="dot"></span>
+      <span id="statusLabel">Connecting…</span>
+    </span>
+  </div>
+
+  <div class="dashboard">
+    <div class="col">
+      <div class="area-balance">
+        <div class="section-title">Net power balance</div>
+        <div class="balance-card" id="balanceCard"></div>
+      </div>
+
+      <div class="area-solar">
+        <div class="section-title">Solar (PV array)</div>
+        <div class="tile-grid" id="pvGrid"></div>
+      </div>
+
+      <div class="area-load">
+        <div class="section-title">Load output</div>
+        <div class="tile-grid" id="loadGrid"></div>
+      </div>
+    </div>
+
+    <div class="col">
+      <div class="area-battery">
+        <div class="section-title">Battery</div>
+        <div class="tile-grid" id="batteryGrid"></div>
+        <div class="tile-grid" id="batterySocGrid" style="margin-top: 2px;"></div>
+      </div>
+
+      <div class="area-temps">
+        <div class="section-title">Temperatures</div>
+        <div class="tile-grid" id="tempsGrid" style="grid-template-columns: repeat(3, 1fr);"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- History: full-width, last on the page, below the whole dashboard
+       (see the file header note for the back-and-forth on this). -->
+  <div class="history-section">
+    <div class="section-title">History — battery charge</div>
+    <div id="historyDay"></div>
+    <div id="historyMonth"></div>
+  </div>
+
+  <div class="footer-note" id="lastUpdateNote">Waiting for the first reading…</div>
+
+  <script>
+    const POLL_INTERVAL_MS = 3000;
+
+    // Field order matches link/server.py's PWR response exactly. The 13th
+    // field (index 12) is the availability flag ("1"/"0"), handled separately.
+    const FIELD_ORDER = [
+      "pv_voltage", "pv_current", "pv_power",
+      "battery_voltage", "battery_charging_current", "battery_charging_power",
+      "load_voltage", "load_current", "load_power",
+      "battery_soc", "battery_temp", "controller_temp",
+      "cpu_temp",
+    ];
+
+    function fmt(v, decimals) {
+      return Number.isFinite(v) ? v.toFixed(decimals).replace(/\.0+$/, (m) => (decimals > 0 ? "" : m)) : "—";
+    }
+
+    // User-confirmed battery capacity, used only for the "time until empty"
+    // estimate on the net power balance tile.
+    const BATTERY_CAPACITY_AH = 35;
+
+    function fmtDuration(minutes) {
+      if (!Number.isFinite(minutes) || minutes < 0) return null;
+      if (minutes < 60) return Math.round(minutes) + " min";
+      const h = Math.floor(minutes / 60);
+      const m = Math.round(minutes % 60);
+      return h + "h" + String(m).padStart(2, "0");
+    }
+
+    // Simple instantaneous estimate: current draw and SOC are both taken at
+    // face value for the whole remaining discharge, so this is a rough
+    // heads-up, not a precision fuel gauge (see the file header note).
+    function estimateTimeToEmpty(watts, batteryVoltage, batterySoc) {
+      if (!Number.isFinite(batteryVoltage) || batteryVoltage <= 0) return null;
+      if (!Number.isFinite(batterySoc)) return null;
+      const dischargeCurrentA = Math.abs(watts) / batteryVoltage;
+      if (dischargeCurrentA <= 0.01) return null; // negligible draw -> no meaningful countdown
+      const remainingAh = (Math.max(0, batterySoc) / 100) * BATTERY_CAPACITY_AH;
+      const minutes = (remainingAh / dischargeCurrentA) * 60;
+      return fmtDuration(minutes);
+    }
+
+    // ---------- status zones ----------
+    // "falling" danger = low value is bad (battery voltage -- discharged is
+    // the problem): critical at the bottom, good at the top.
+    // "rising" danger = high value is bad (temperatures -- overheating is
+    // the problem): good at the bottom, critical at the top.
+    const STATUS_ZONES_FALLING = (breaks) => [
+      { max: breaks[0], color: "var(--status-critical)" },
+      { max: breaks[1], color: "var(--status-serious)" },
+      { max: breaks[2], color: "var(--status-warning)" },
+      { max: Infinity,  color: "var(--status-good)" },
+    ];
+    const STATUS_ZONES_RISING = (breaks) => [
+      { max: breaks[0], color: "var(--status-good)" },
+      { max: breaks[1], color: "var(--status-warning)" },
+      { max: breaks[2], color: "var(--status-serious)" },
+      { max: Infinity,  color: "var(--status-critical)" },
+    ];
+    function zoneFor(zones, v) { return zones.find((z) => v <= z.max) || zones[zones.length - 1]; }
+
+    // ---------- flow stat tile (sparkline) ----------
+    function makeStatTile(container, { label, unit, decimals = 2, min, max }) {
+      const tile = document.createElement("div");
+      tile.className = "stat-tile";
+      tile.innerHTML = `
+        <div class="label">${label}</div>
+        <div class="value"><span class="num">—</span><span class="unit">${unit}</span></div>
+        <svg class="spark" width="100%" height="28" viewBox="0 0 120 28" preserveAspectRatio="none">
+          <path class="area" d=""></path>
+          <path class="line" d=""></path>
+          <circle class="last" r="2.5" cx="0" cy="0" style="opacity: 0;"></circle>
+        </svg>
+      `;
+      container.appendChild(tile);
+      const numEl = tile.querySelector(".num");
+      const lineEl = tile.querySelector("path.line");
+      const areaEl = tile.querySelector("path.area");
+      const dotEl = tile.querySelector("circle.last");
+      const history = [];
+      const HISTORY_LEN = 20;
+
+      return {
+        push(value, stale) {
+          tile.classList.toggle("stale", !!stale);
+          if (!Number.isFinite(value)) { numEl.textContent = "—"; return; }
+          history.push(value);
+          if (history.length > HISTORY_LEN) history.shift();
+          numEl.textContent = fmt(value, decimals);
+
+          const lo = min ?? Math.min(...history);
+          const hi = max ?? Math.max(...history, lo + 0.001);
+          const pts = history.map((v, i) => {
+            const x = (i / (HISTORY_LEN - 1)) * 120;
+            const y = 26 - ((v - lo) / (hi - lo)) * 24;
+            return [x, y];
+          });
+          if (pts.length >= 2) {
+            const linePath = pts.map((p, i) => (i === 0 ? "M" : "L") + p[0].toFixed(1) + "," + p[1].toFixed(1)).join(" ");
+            lineEl.setAttribute("d", linePath);
+            areaEl.setAttribute("d", linePath + ` L${pts[pts.length - 1][0].toFixed(1)},28 L${pts[0][0].toFixed(1)},28 Z`);
+            const last = pts[pts.length - 1];
+            dotEl.setAttribute("cx", last[0]);
+            dotEl.setAttribute("cy", last[1]);
+            dotEl.style.opacity = "1";
+          }
+        },
+      };
+    }
+
+    // ---------- status gauge tile (segmented bar) ----------
+    function makeGaugeTile(container, { label, unit, decimals, lo, hi, breaks, direction = "falling", wide }) {
+      const tile = document.createElement("div");
+      tile.className = "gauge-tile" + (wide ? " wide" : "");
+      tile.innerHTML = `
+        <div class="label-row">
+          <span class="label">${label}</span>
+          <span class="value"><span class="num">—</span> ${unit}</span>
+        </div>
+        <div class="lcd-track"></div>
+      `;
+      container.appendChild(tile);
+      const track = tile.querySelector(".lcd-track");
+      const numEl = tile.querySelector(".num");
+      const valueEl = tile.querySelector(".value");
+      const zones = (direction === "rising" ? STATUS_ZONES_RISING : STATUS_ZONES_FALLING)(breaks);
+      const SEGMENTS = 24;
+      const segs = [];
+      for (let i = 0; i < SEGMENTS; i++) {
+        const seg = document.createElement("div");
+        seg.className = "lcd-seg";
+        const segValue = lo + ((i + 0.5) / SEGMENTS) * (hi - lo);
+        seg.dataset.color = zoneFor(zones, segValue).color;
+        track.appendChild(seg);
+        segs.push(seg);
+      }
+      return {
+        push(value) {
+          if (!Number.isFinite(value)) {
+            numEl.textContent = "—";
+            segs.forEach((seg) => (seg.style.backgroundColor = "var(--border)"));
+            return;
+          }
+          numEl.textContent = fmt(value, decimals);
+          const zone = zoneFor(zones, value);
+          valueEl.style.color = zone.color;
+          const pct = Math.max(0, Math.min(1, (value - lo) / (hi - lo)));
+          segs.forEach((seg, i) => {
+            const lit = (i + 0.5) / SEGMENTS <= pct;
+            seg.style.backgroundColor = lit ? seg.dataset.color : "var(--border)";
+          });
+        },
+      };
+    }
+
+    // ---------- vertical (thermometer-style) gauge tile, for the grouped
+    // Temperatures panel: same segmented status-zone logic as the
+    // horizontal makeGaugeTile above, just drawn as a column instead of a
+    // row -- the user's chosen layout over a horizontal-bars alternative
+    // (see pages/power_explained.html) ----------
+    function makeGaugeTileVertical(container, { label, unit, decimals, lo, hi, breaks, direction = "rising" }) {
+      const tile = document.createElement("div");
+      tile.className = "vgauge-tile";
+      tile.innerHTML = `
+        <div class="label">${label}</div>
+        <div class="vlcd-track"></div>
+        <div class="value"><span class="num">—</span> ${unit}</div>
+      `;
+      container.appendChild(tile);
+      const track = tile.querySelector(".vlcd-track");
+      const numEl = tile.querySelector(".num");
+      const valueEl = tile.querySelector(".value");
+      const zones = (direction === "rising" ? STATUS_ZONES_RISING : STATUS_ZONES_FALLING)(breaks);
+      const SEGMENTS = 16;
+      const segs = [];
+      for (let i = 0; i < SEGMENTS; i++) {
+        const seg = document.createElement("div");
+        seg.className = "vlcd-seg";
+        const segValue = lo + ((i + 0.5) / SEGMENTS) * (hi - lo);
+        seg.dataset.color = zoneFor(zones, segValue).color;
+        track.appendChild(seg);
+        segs.push(seg);
+      }
+      return {
+        push(value) {
+          if (!Number.isFinite(value)) {
+            numEl.textContent = "—";
+            segs.forEach((seg) => (seg.style.backgroundColor = "var(--border)"));
+            return;
+          }
+          numEl.textContent = fmt(value, decimals);
+          const zone = zoneFor(zones, value);
+          valueEl.style.color = zone.color;
+          const pct = Math.max(0, Math.min(1, (value - lo) / (hi - lo)));
+          segs.forEach((seg, i) => {
+            const lit = (i + 0.5) / SEGMENTS <= pct;
+            seg.style.backgroundColor = lit ? seg.dataset.color : "var(--border)";
+          });
+        },
+      };
+    }
+
+    // ---------- net power balance dial (diverging: 0 W at the apex) ----------
+    function makeBalanceGauge(container, { maxWatts = 100 } = {}) {
+      container.innerHTML = `
+        <div class="dial-wrap">
+          <div class="dial-center">
+            <svg width="220" height="130" viewBox="0 0 220 130">
+              <path d="M 110 20 A 90 90 0 0 0 20 110" fill="none" stroke="var(--border)" stroke-width="16" stroke-linecap="round"/>
+              <path d="M 110 20 A 90 90 0 0 1 200 110" fill="none" stroke="var(--border)" stroke-width="16" stroke-linecap="round"/>
+              <path class="balance-left" d="M 110 20 A 90 90 0 0 0 20 110" fill="none" stroke="var(--status-critical)" stroke-width="16" stroke-linecap="round"
+                    stroke-dasharray="141.4" stroke-dashoffset="141.4"/>
+              <path class="balance-right" d="M 110 20 A 90 90 0 0 1 200 110" fill="none" stroke="var(--status-good)" stroke-width="16" stroke-linecap="round"
+                    stroke-dasharray="141.4" stroke-dashoffset="141.4"/>
+            </svg>
+            <div class="dial-value">—</div>
+            <div class="dial-state">—</div>
+            <div class="dial-ttf"></div>
+          </div>
+          <div class="dial-ticks"><span>-${maxWatts} W</span><span>0</span><span>+${maxWatts} W</span></div>
+        </div>
+      `;
+      const QUARTER_LENGTH = 141.4;
+      const leftFill = container.querySelector(".balance-left");
+      const rightFill = container.querySelector(".balance-right");
+      const valueEl = container.querySelector(".dial-value");
+      const stateEl = container.querySelector(".dial-state");
+      const ttfEl = container.querySelector(".dial-ttf");
+
+      function fmtWatts(w) {
+        const sign = w > 0 ? "+" : w < 0 ? "−" : "";
+        return sign + Math.abs(Math.round(w)) + " W";
+      }
+
+      function hideTtf() {
+        ttfEl.textContent = "";
+        ttfEl.style.opacity = "0";
+      }
+
+      return {
+        // battery: optional { voltage, soc } snapshot, used only to estimate
+        // time-to-empty while discharging. Omit (or pass stale data as NaN)
+        // and the countdown simply stays hidden.
+        push(watts, battery) {
+          if (!Number.isFinite(watts)) {
+            valueEl.textContent = "—";
+            stateEl.textContent = "—";
+            leftFill.style.strokeDashoffset = QUARTER_LENGTH;
+            rightFill.style.strokeDashoffset = QUARTER_LENGTH;
+            valueEl.style.color = "var(--text-muted)";
+            stateEl.style.color = "var(--text-secondary)";
+            hideTtf();
+            return;
+          }
+          valueEl.textContent = fmtWatts(watts);
+          const t = Math.max(0, Math.min(1, Math.abs(watts) / maxWatts));
+          const fillLen = t * QUARTER_LENGTH;
+          if (watts > 0.5) {
+            rightFill.style.strokeDashoffset = QUARTER_LENGTH - fillLen;
+            leftFill.style.strokeDashoffset = QUARTER_LENGTH;
+            valueEl.style.color = "var(--status-good)";
+            stateEl.textContent = "Storing";
+            stateEl.style.color = "var(--status-good)";
+            hideTtf();
+          } else if (watts < -0.5) {
+            leftFill.style.strokeDashoffset = QUARTER_LENGTH - fillLen;
+            rightFill.style.strokeDashoffset = QUARTER_LENGTH;
+            valueEl.style.color = "var(--status-critical)";
+            stateEl.textContent = "Consuming";
+            stateEl.style.color = "var(--status-critical)";
+            const ttf = battery ? estimateTimeToEmpty(watts, battery.voltage, battery.soc) : null;
+            if (ttf) {
+              ttfEl.textContent = "~" + ttf + " until empty";
+              ttfEl.style.opacity = "1";
+            } else {
+              hideTtf();
+            }
+          } else {
+            leftFill.style.strokeDashoffset = QUARTER_LENGTH;
+            rightFill.style.strokeDashoffset = QUARTER_LENGTH;
+            valueEl.style.color = "var(--text-primary)";
+            stateEl.textContent = "Balanced";
+            stateEl.style.color = "var(--text-secondary)";
+            hideTtf();
+          }
+        },
+      };
+    }
+
+    // ---------- history chart (day/month battery-charge trend) ----------
+    // Single series (battery_soc) -- per the dataviz convention this
+    // project follows elsewhere (see makeGaugeTile above), a one-series
+    // chart needs no legend, so this is deliberately simpler than a
+    // multi-series small-multiple: one line, one hover tooltip, one pair
+    // of axis labels (0/50/100% and the window's start/end time).
+    function makeHistoryChart(container, { title, unitLabel, xStartLabel, xEndLabel }) {
+      const WIDTH = 1000, HEIGHT = 140, PAD_L = 28, PAD_R = 4, PAD_T = 8, PAD_B = 6;
+      const card = document.createElement("div");
+      card.className = "history-card";
+      card.innerHTML = `
+        <div class="history-card-title">${title} <span class="unit">(${unitLabel})</span></div>
+        <div class="history-chart-wrap">
+          <svg class="history-svg" viewBox="0 0 ${WIDTH} ${HEIGHT}" preserveAspectRatio="none">
+            <line class="grid-line" x1="${PAD_L}" x2="${WIDTH - PAD_R}" y1="${PAD_T}" y2="${PAD_T}"></line>
+            <line class="grid-line" x1="${PAD_L}" x2="${WIDTH - PAD_R}" y1="${(HEIGHT - PAD_T - PAD_B) / 2 + PAD_T}" y2="${(HEIGHT - PAD_T - PAD_B) / 2 + PAD_T}"></line>
+            <line class="grid-line" x1="${PAD_L}" x2="${WIDTH - PAD_R}" y1="${HEIGHT - PAD_B}" y2="${HEIGHT - PAD_B}"></line>
+            <text class="grid-label" x="2" y="${PAD_T + 3}">100</text>
+            <text class="grid-label" x="2" y="${(HEIGHT - PAD_T - PAD_B) / 2 + PAD_T + 3}">50</text>
+            <text class="grid-label" x="2" y="${HEIGHT - PAD_B + 3}">0</text>
+            <path class="area" d=""></path>
+            <path class="line" d=""></path>
+            <line class="hover-guide" x1="0" x2="0" y1="${PAD_T}" y2="${HEIGHT - PAD_B}"></line>
+            <circle class="hover-dot" r="3" cx="0" cy="0"></circle>
+          </svg>
+          <div class="history-tooltip"></div>
+          <div class="history-empty" style="display:none;">No data logged yet for this period — the Tracer needs to have reported data at least once since the logger started (samples are taken every 5 minutes, only while the RS485 link is live).</div>
+        </div>
+        <div class="history-xaxis"><span>${xStartLabel}</span><span>${xEndLabel}</span></div>
+      `;
+      container.appendChild(card);
+
+      const svg = card.querySelector(".history-svg");
+      const lineEl = card.querySelector("path.line");
+      const areaEl = card.querySelector("path.area");
+      const guideEl = card.querySelector(".hover-guide");
+      const dotEl = card.querySelector(".hover-dot");
+      const tooltipEl = card.querySelector(".history-tooltip");
+      const emptyEl = card.querySelector(".history-empty");
+      const chartWrap = card.querySelector(".history-chart-wrap");
+
+      let points = []; // [{x, y, ts, value}], in plot (viewBox) coordinates
+
+      function render(rows, key) {
+        if (!rows || rows.length === 0) {
+          emptyEl.style.display = "block";
+          svg.style.display = "none";
+          points = [];
+          return;
+        }
+        emptyEl.style.display = "none";
+        svg.style.display = "block";
+
+        const tsMin = rows[0].ts, tsMax = rows[rows.length - 1].ts;
+        const tsSpan = Math.max(1, tsMax - tsMin);
+        const plotW = WIDTH - PAD_L - PAD_R, plotH = HEIGHT - PAD_T - PAD_B;
+
+        points = rows.map((row) => {
+          const x = PAD_L + ((row.ts - tsMin) / tsSpan) * plotW;
+          const value = row[key];
+          const y = PAD_T + (1 - Math.max(0, Math.min(100, value)) / 100) * plotH;
+          return { x, y, ts: row.ts, value };
+        });
+
+        const linePath = points.map((p, i) => (i === 0 ? "M" : "L") + p.x.toFixed(1) + "," + p.y.toFixed(1)).join(" ");
+        lineEl.setAttribute("d", linePath);
+        areaEl.setAttribute(
+          "d",
+          linePath + ` L${points[points.length - 1].x.toFixed(1)},${HEIGHT - PAD_B} L${points[0].x.toFixed(1)},${HEIGHT - PAD_B} Z`
+        );
+      }
+
+      function hideHover() {
+        guideEl.style.opacity = "0";
+        dotEl.style.opacity = "0";
+        tooltipEl.style.opacity = "0";
+      }
+
+      function onMove(evt) {
+        if (points.length === 0) return;
+        const rect = svg.getBoundingClientRect();
+        const relX = ((evt.clientX - rect.left) / rect.width) * WIDTH;
+        // Nearest point by x -- points are already in ascending x order.
+        let nearest = points[0];
+        for (const p of points) {
+          if (Math.abs(p.x - relX) < Math.abs(nearest.x - relX)) nearest = p;
+        }
+        guideEl.setAttribute("x1", nearest.x);
+        guideEl.setAttribute("x2", nearest.x);
+        guideEl.style.opacity = "1";
+        dotEl.setAttribute("cx", nearest.x);
+        dotEl.setAttribute("cy", nearest.y);
+        dotEl.style.opacity = "1";
+
+        const when = new Date(nearest.ts * 1000);
+        tooltipEl.innerHTML =
+          `<div class="t-time">${when.toLocaleString()}</div>` +
+          `<div class="t-value">${fmt(nearest.value, 0)} ${unitLabel}</div>`;
+        const pctX = (nearest.x / WIDTH) * 100;
+        tooltipEl.style.left = pctX + "%";
+        tooltipEl.style.opacity = "1";
+      }
+
+      chartWrap.addEventListener("mousemove", onMove);
+      chartWrap.addEventListener("mouseleave", hideHover);
+
+      return { render };
+    }
+
+    // ---------- build the page ----------
+    const balanceGauge = makeBalanceGauge(document.getElementById("balanceCard"), { maxWatts: 100 });
+
+    const pvGrid = document.getElementById("pvGrid");
+    const pvVoltage = makeStatTile(pvGrid, { label: "Voltage", unit: "V" });
+    const pvCurrent = makeStatTile(pvGrid, { label: "Current", unit: "A" });
+    const pvPower   = makeStatTile(pvGrid, { label: "Power",   unit: "W" });
+
+    const batteryGrid = document.getElementById("batteryGrid");
+    const battVoltage = makeGaugeTile(batteryGrid, {
+      label: "Voltage", unit: "V", decimals: 2, lo: 10, hi: 15,
+      breaks: [11.5, 12.0, 12.8],
+    });
+    const battChargingCurrent = makeStatTile(batteryGrid, { label: "Charging current", unit: "A" });
+    const battChargingPower   = makeStatTile(batteryGrid, { label: "Charging power",   unit: "W" });
+    const batterySocGrid = document.getElementById("batterySocGrid");
+    const battSoc = makeGaugeTile(batterySocGrid, {
+      label: "State of charge", unit: "%", decimals: 0, lo: 0, hi: 100,
+      breaks: [25, 50, 75],
+    });
+
+    const loadGrid = document.getElementById("loadGrid");
+    const loadVoltage = makeStatTile(loadGrid, { label: "Voltage", unit: "V" });
+    const loadCurrent = makeStatTile(loadGrid, { label: "Current", unit: "A" });
+    const loadPower   = makeStatTile(loadGrid, { label: "Power",   unit: "W" });
+
+    // Grouped Temperatures panel (bottom-right): battery + controller
+    // (both from the Tracer) + Pi #1's own CPU, all vertical bars.
+    const tempsGrid = document.getElementById("tempsGrid");
+    const battTemp = makeGaugeTileVertical(tempsGrid, {
+      label: "Battery", unit: "°C", decimals: 1, lo: 0, hi: 80,
+      breaks: [40, 50, 60], direction: "rising",
+    });
+    const controllerTemp = makeGaugeTileVertical(tempsGrid, {
+      label: "Controller", unit: "°C", decimals: 1, lo: 0, hi: 80,
+      breaks: [45, 55, 65], direction: "rising",
+    });
+    // Thresholds proposed, not yet field-validated -- see the file header note.
+    const cpuTemp = makeGaugeTileVertical(tempsGrid, {
+      label: "CPU (Pi #1)", unit: "°C", decimals: 1, lo: 20, hi: 100,
+      breaks: [60, 70, 80], direction: "rising",
+    });
+
+    const historyDay = makeHistoryChart(document.getElementById("historyDay"), {
+      title: "Day", unitLabel: "%", xStartLabel: "-24h", xEndLabel: "now",
+    });
+    const historyMonth = makeHistoryChart(document.getElementById("historyMonth"), {
+      title: "Month", unitLabel: "%", xStartLabel: "-30d", xEndLabel: "now",
+    });
+
+    // ---------- history polling (new /api/power_history endpoint) ----------
+    // Independent, slower timer than the live PWR polling above -- a
+    // new sample only lands on Pi #1 every 5 minutes (link/power_history.
+    // py's POWER_LOG_INTERVAL_S), so refreshing these charts more often
+    // than that would just re-fetch the same rows.
+    const HISTORY_POLL_INTERVAL_MS = 5 * 60 * 1000;
+
+    async function fetchHistory(period) {
+      const res = await fetch("/api/power_history?period=" + period);
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      const data = await res.json();
+      if (!data.ok) throw new Error(data.error || "robot unreachable");
+      return data.rows;
+    }
+
+    async function pollHistoryOnce() {
+      try {
+        const [dayRows, monthRows] = await Promise.all([
+          fetchHistory("day"),
+          fetchHistory("month"),
+        ]);
+        historyDay.render(dayRows, "battery_soc");
+        historyMonth.render(monthRows, "battery_soc");
+      } catch (err) {
+        // Best-effort: the live dashboard above is the important part of
+        // this page and keeps working regardless -- a history fetch
+        // failure (Pi #1 briefly unreachable) just leaves the charts on
+        // their last known data (or empty, on first load) until the
+        // next tick.
+        console.warn("history fetch failed:", err.message);
+      }
+    }
+
+    pollHistoryOnce();
+    setInterval(pollHistoryOnce, HISTORY_POLL_INTERVAL_MS);
+
+    // ---------- live polling (real /api/send contract) ----------
+    function setStatus(available, label) {
+      const badge = document.getElementById("statusBadge");
+      const labelEl = document.getElementById("statusLabel");
+      badge.classList.toggle("ok", available);
+      badge.classList.toggle("down", !available);
+      labelEl.textContent = label || (available ? "Tracer connected" : "Tracer unavailable");
+    }
+
+    async function fetchPowerSnapshot() {
+      const res = await fetch("/api/send", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ command: "PWR" }),
+      });
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      const data = await res.json();
+
+      if (!data.ok) {
+        throw new Error(data.error || "robot returned an error");
+      }
+      if (!data.fields || data.fields.length < FIELD_ORDER.length + 1) {
+        throw new Error("unexpected PWR response: " + (data.raw_response || ""));
+      }
+
+      const values = {};
+      FIELD_ORDER.forEach((name, i) => { values[name] = parseFloat(data.fields[i]); });
+      values.available = data.fields[FIELD_ORDER.length] === "1";
+      return values;
+    }
+
+    async function pollOnce() {
+      try {
+        const v = await fetchPowerSnapshot();
+        const stale = !v.available;
+        setStatus(v.available);
+
+        balanceGauge.push(
+          stale ? NaN : v.pv_power - v.load_power,
+          stale ? null : { voltage: v.battery_voltage, soc: v.battery_soc }
+        );
+        pvVoltage.push(v.pv_voltage, stale);
+        pvCurrent.push(v.pv_current, stale);
+        pvPower.push(v.pv_power, stale);
+        battVoltage.push(stale ? NaN : v.battery_voltage);
+        battChargingCurrent.push(v.battery_charging_current, stale);
+        battChargingPower.push(v.battery_charging_power, stale);
+        battTemp.push(stale ? NaN : v.battery_temp);
+        battSoc.push(stale ? NaN : v.battery_soc);
+        loadVoltage.push(v.load_voltage, stale);
+        loadCurrent.push(v.load_current, stale);
+        loadPower.push(v.load_power, stale);
+        controllerTemp.push(stale ? NaN : v.controller_temp);
+        // Not gated by `stale`: cpu_temp is Pi #1's own CPU, independent
+        // of whether the Tracer/RS485 cable is plugged in (see the file
+        // header note and link/cpu_temp.py on the robot repo).
+        cpuTemp.push(v.cpu_temp);
+
+        document.getElementById("lastUpdateNote").textContent =
+          "Last update: " + new Date().toLocaleTimeString();
+      } catch (err) {
+        setStatus(false, "Connection error");
+        document.getElementById("lastUpdateNote").textContent =
+          "Connection error: " + err.message;
+      }
+    }
+
+    pollOnce();
+    setInterval(pollOnce, POLL_INTERVAL_MS);
+  </script>
+
+</body>
+</html>

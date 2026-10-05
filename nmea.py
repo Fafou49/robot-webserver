@@ -56,3 +56,43 @@ def parse_sentence(raw: str):
     sentence_type = parts[1]
     fields = parts[2:]
     return sentence_type, fields
+
+
+def decimal_to_nmea(value: float, is_longitude: bool):
+    """Converts a signed decimal-degrees coordinate into this protocol's
+    on-the-wire (ddmm.mmmm string, direction letter) pair, e.g. 47.391534
+    -> ("4723.492", "N"), -0.739006 -> ("00044.340", "W"). Longitude gets
+    3-digit degrees (000-179), latitude 2 (00-90), matching standard NMEA
+    GGA/RMC fields. Ported from link/nmea.py (robot_repo) on 2026-09-19 --
+    until now this side only ever needed the reverse direction in Python
+    (see nmea_to_decimal below); NAV/RTE encoding happened entirely in
+    this page's own JS (decimalToNmea in app.py). Kept in sync with the
+    robot repo's copy per this module's own docstring."""
+    direction = ("W" if value < 0 else "E") if is_longitude else ("S" if value < 0 else "N")
+    magnitude = abs(value)
+    degrees = int(magnitude)
+    minutes = (magnitude - degrees) * 60
+    deg_digits = 3 if is_longitude else 2
+    return f"{degrees:0{deg_digits}d}{minutes:06.3f}", direction
+
+
+def nmea_to_decimal(raw: str, direction: str):
+    """The inverse of decimal_to_nmea: parses a ddmm.mmmm string plus its
+    direction letter back into signed decimal degrees. Returns None if
+    `raw` isn't a usable number. Ported from link/nmea.py (robot_repo) on
+    2026-09-19 for app.py's /api/map_data (decoding STA/WPT/GRT responses
+    server-side) and for logging a NAV command's fields to the local
+    history file (see app.py's _log_nav_command()) -- this project's own
+    JS already had an equivalent (nmeaToDecimal), this just gives the
+    Python side the same capability, kept in sync with the robot repo's
+    copy per this module's own docstring."""
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return None
+    degrees = int(value // 100)
+    minutes = value - degrees * 100
+    decimal = degrees + minutes / 60
+    if direction in ("S", "W"):
+        decimal = -decimal
+    return decimal

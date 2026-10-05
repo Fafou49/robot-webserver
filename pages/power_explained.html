@@ -1,0 +1,318 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Power Dashboard — Explained</title>
+<style>
+  :root {
+    --bg: #f7f5f0;
+    --surface: #ffffff;
+    --ink: #1a1a1a;
+    --muted: #6b6b6b;
+    --line: #ddd8cc;
+    --accent: #a13d2e;
+    --accent-bg: #f6e9e5;
+    --code-bg: #f1efe6;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14120f;
+      --surface: #1c1a16;
+      --ink: #ece8de;
+      --muted: #9a9488;
+      --line: #3a362e;
+      --accent: #e0806b;
+      --accent-bg: #2c1c17;
+      --code-bg: #211f1a;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: Georgia, "Times New Roman", serif;
+    line-height: 1.55;
+  }
+  .wrap { max-width: 880px; margin: 0 auto; padding: 56px 24px 90px; }
+
+  header { margin-bottom: 36px; }
+  .status {
+    display: inline-block;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--accent);
+    background: var(--accent-bg);
+    border: 1px solid var(--accent);
+    border-radius: 999px;
+    padding: 4px 12px;
+    margin-bottom: 14px;
+  }
+  h1 { font-size: 30px; margin: 0 0 6px; font-weight: 600; }
+  .subtitle { color: var(--muted); font-size: 15px; margin: 0; }
+
+  h2 {
+    font-size: 19px;
+    margin: 44px 0 12px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--line);
+    font-weight: 600;
+  }
+  h3 { font-size: 15.5px; margin: 22px 0 8px; font-weight: 600; }
+  p { margin: 12px 0; }
+
+  code, .mono {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 0.92em;
+  }
+  code {
+    background: var(--code-bg);
+    border-radius: 4px;
+    padding: 1px 5px;
+  }
+
+  .formula {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 14px;
+    background: var(--code-bg);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 14px 18px;
+    margin: 16px 0;
+    overflow-x: auto;
+    white-space: pre;
+  }
+
+  ul.notes { padding-left: 20px; }
+  ul.notes li { margin: 6px 0; }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 16px 0 8px;
+    font-size: 14.5px;
+    background: var(--surface);
+  }
+  caption {
+    text-align: left;
+    font-size: 13px;
+    color: var(--muted);
+    margin-bottom: 8px;
+    font-style: italic;
+  }
+  th, td {
+    border-bottom: 1px solid var(--line);
+    padding: 10px 12px;
+    text-align: left;
+    vertical-align: top;
+  }
+  th {
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--muted);
+    font-weight: 600;
+  }
+  td.example { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; }
+
+  .swatch {
+    display: inline-block;
+    width: 11px; height: 11px;
+    border-radius: 3px;
+    margin-right: 6px;
+    vertical-align: middle;
+  }
+
+  .pending-pill {
+    display: inline-block;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    border-radius: 4px;
+    padding: 2px 7px;
+    background: var(--accent-bg);
+    color: var(--accent);
+    border: 1px solid var(--accent);
+  }
+
+  .back-link {
+    display: inline-block;
+    margin-bottom: 18px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 13px;
+    color: var(--muted);
+    text-decoration: none;
+  }
+  .back-link:hover { color: var(--ink); }
+
+  footer {
+    margin-top: 60px;
+    padding-top: 16px;
+    border-top: 1px solid var(--line);
+    font-size: 13px;
+    color: var(--muted);
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <a class="back-link" href="/power">&larr; Back to the Power dashboard</a>
+    <div class="status">Reference doc &mdash; updated alongside every change to /power</div>
+    <h1>Power Dashboard — Explained</h1>
+    <p class="subtitle">What each tile on <code>/power</code> shows, the exact formula or threshold behind it, and the assumptions that went into each one. Written for whoever (including future-me) needs to tweak a threshold later.</p>
+  </header>
+
+  <section>
+    <h2>Overview</h2>
+    <p>
+      <code>/power</code> is a read-only monitoring page: it polls the robot's <code>PWR</code> sentence every 3&nbsp;seconds (same transport as <code>STA</code> on <code>/control</code>, documented on the <a href="/pages/protocole_controle.html">Protocol</a> page) and never sends a command that changes robot state. The dashboard has five groups: <strong>Net power balance</strong> (top-left), <strong>Solar&nbsp;/ PV array</strong>, <strong>Battery</strong>, <strong>Load output</strong>, and <strong>Temperatures</strong> (bottom-right &mdash; battery, controller, and Pi&nbsp;#1's own CPU, grouped together as vertical bars). All the "is this value okay?" tiles (state of charge, battery voltage, the three temperatures) use the same segmented status-color bar; the pure flow readings (PV and load voltage/current/power) use a plain value with a rolling sparkline instead, since there's no natural "good/bad" zone for those. Below the live dashboard, a <strong>History</strong> section (see its own section further down) trends battery charge over a rolling day and month, backed by a small database on Pi&nbsp;#1.
+    </p>
+  </section>
+
+  <section>
+    <h2>Status color scale</h2>
+    <p>Every segmented gauge on the page is colored with the same four-step scale, in the same order, so a color always means the same thing wherever it appears:</p>
+    <ul class="notes">
+      <li><span class="swatch" style="background:#0ca30c"></span><code>good</code> &mdash; #0ca30c</li>
+      <li><span class="swatch" style="background:#fab219"></span><code>warning</code> &mdash; #fab219</li>
+      <li><span class="swatch" style="background:#ec835a"></span><code>serious</code> &mdash; #ec835a</li>
+      <li><span class="swatch" style="background:#d03b3b"></span><code>critical</code> &mdash; #d03b3b</li>
+    </ul>
+    <p>
+      The zones run in opposite directions depending on which way danger points: for <strong>state of charge</strong> and <strong>battery voltage</strong>, a <em>low</em> value is the problem (a draining battery), so critical sits at the bottom of the scale and good at the top &mdash; a &quot;falling danger&quot; gauge. For <strong>battery temperature</strong> and <strong>controller temperature</strong>, a <em>high</em> value is the problem (overheating), so the order is flipped &mdash; a &quot;rising danger&quot; gauge. Mixing these up silently paints a normal reading red or a dangerous one green, so every gauge on the page is explicit about which direction it uses (see the thresholds table below).
+    </p>
+  </section>
+
+  <section>
+    <h2>Net power balance</h2>
+    <div class="formula">net_power_W = pv_power - load_power</div>
+    <p>
+      The semi-circular dial reads 0&nbsp;W at its apex. A positive value (production greater than draw) fills the right arm in green and reads &quot;Storing&quot;; a negative value fills the left arm in red and reads &quot;Consuming&quot;. The scale is fixed at &plusmn;100&nbsp;W (confirmed against this robot's actual panel/load sizing).
+    </p>
+    <p>
+      <strong>Assumption:</strong> this formula only gives the real &quot;is the battery charging or draining&quot; number if the robot's own electronics are wired through the Tracer controller's <code>LOAD</code> output (its switched, protected output) rather than straight off the battery bus. That's the wiring this robot uses, so <code>load_power</code> is the right &quot;consumption&quot; term here.
+    </p>
+    <h3>Time until empty</h3>
+    <p>Shown under the dial only while in the &quot;Consuming&quot; state (discharging). Hidden the moment the balance turns positive or zero.</p>
+    <div class="formula">discharge_current_A   = abs(net_power_W) / battery_voltage
+remaining_capacity_Ah = (battery_soc / 100) * 35      # 35Ah battery, user-confirmed
+minutes_until_empty   = remaining_capacity_Ah / discharge_current_A * 60</div>
+    <p>
+      This is a simple instantaneous estimate: it assumes the current draw stays exactly where it is right now for the rest of the discharge, and it doesn't model the battery's real discharge curve or the Peukert effect (a battery drained faster delivers less total capacity than its nameplate Ah rating). Good enough as a rough heads-up ("you've got about 40 minutes"), not a precision fuel gauge. Hidden entirely when the draw is negligible (&lt;10&nbsp;mA) to avoid displaying an absurdly large number.
+    </p>
+  </section>
+
+  <section>
+    <h2>State of charge (SOC)</h2>
+    <p>
+      SOC is a percentage estimate of how much usable energy is left in the battery relative to a full charge: 100% means fully charged, 0% means the controller considers it fully discharged (its configured low-voltage disconnect point) &mdash; not a direct physical measurement, since a battery has no native "percentage" signal to read.
+    </p>
+    <p>
+      The Tracer charge controller computes this value internally and the robot simply reads it over Modbus, in the same real-time data block as the PV/load/battery readings (one poll covers all of them, via <code>TracerReader</code>) &mdash; <code>battery_soc</code> is not something <code>link/tracer_reader.py</code> calculates itself.
+    </p>
+    <p>
+      <strong>Caveat worth knowing:</strong> on this class of MPPT controller, that internal estimate is primarily voltage-based, calibrated against the battery type/capacity configured in the Tracer's own settings (battery type, nominal voltage, voltage thresholds) rather than true coulomb counting. A heavy, brief load causes voltage sag, which can make the reported SOC dip and recover a few points even though the battery's actual remaining capacity barely moved. Treat a single SOC reading taken right after the motors pull current with a bit of caution; the trend over several readings is more trustworthy than any one instant value &mdash; which is also why the dashboard's thresholds (25/50/75%, see below) are read straight off this same controller-reported field rather than recomputed independently.
+    </p>
+  </section>
+
+  <section>
+    <h2>Thresholds reference</h2>
+    <table>
+      <caption>All four-zone gauges currently on /power. Degrees in &deg;C, voltage in V, SOC in %.</caption>
+      <thead>
+        <tr><th>Gauge</th><th>Direction</th><th>Critical</th><th>Serious</th><th>Warning</th><th>Good</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>State of charge</td>
+          <td>Falling (low = bad)</td>
+          <td>&le; 25%</td><td>25&ndash;50%</td><td>50&ndash;75%</td><td>&gt; 75%</td>
+        </tr>
+        <tr>
+          <td>Battery voltage <span class="mono" style="color:var(--muted)">(12V system)</span></td>
+          <td>Falling (low = bad)</td>
+          <td>&lt; 11.5V</td><td>11.5&ndash;12.0V</td><td>12.0&ndash;12.8V</td><td>&gt; 12.8V</td>
+        </tr>
+        <tr>
+          <td>Battery temperature</td>
+          <td>Rising (high = bad)</td>
+          <td>&gt; 60&deg;C</td><td>50&ndash;60&deg;C</td><td>40&ndash;50&deg;C</td><td>&lt; 40&deg;C</td>
+        </tr>
+        <tr>
+          <td>Controller temperature</td>
+          <td>Rising (high = bad)</td>
+          <td>&gt; 65&deg;C</td><td>55&ndash;65&deg;C</td><td>45&ndash;55&deg;C</td><td>&lt; 45&deg;C</td>
+        </tr>
+        <tr>
+          <td>CPU temperature (Pi&nbsp;#1) <span class="pending-pill">unconfirmed</span></td>
+          <td>Rising (high = bad)</td>
+          <td>&ge; 80&deg;C</td><td>70&ndash;80&deg;C</td><td>60&ndash;70&deg;C</td><td>&lt; 60&deg;C</td>
+        </tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>CPU temperature (Pi&nbsp;#1) <span class="pending-pill">implemented 2026-10-05</span></h2>
+    <p>
+      Pi&nbsp;#1's own CPU temperature is now shown alongside the battery and controller temperatures, grouped together in a single &quot;Temperatures&quot; panel at the bottom-right of the page &mdash; drawn as a vertical (thermometer-style) bar, the layout chosen after comparing it against a horizontal-bars alternative.
+    </p>
+    <h3>How it's read</h3>
+    <p>
+      <code>link/cpu_temp.py</code> (robot repo) reads <code>/sys/class/thermal/thermal_zone0/temp</code> directly &mdash; a plain kernel sysfs file, present on every Linux box with a thermal zone, no subprocess and no extra package. It holds the temperature in millidegrees Celsius as plain text (e.g. <code>47800</code> &rarr; divide by 1000 for 47.8&deg;C). Chosen over shelling out to <code>vcgencmd measure_temp</code> (needs the <code>vcgencmd</code> binary and spawns a subprocess on every read). No background thread, unlike <code>TracerReader</code>: a single sysfs read is cheap enough to do fresh on every <code>PWR</code> request, inside <code>RobotState.power_status()</code>.
+    </p>
+    <h3>Thresholds <span class="pending-pill">unconfirmed</span></h3>
+    <p>
+      Based on Raspberry Pi's own thermal throttling behaviour (soft throttling kicks in around 80&ndash;85&deg;C on recent Pi boards): good below 60&deg;C, warning 60&ndash;70&deg;C, serious 70&ndash;80&deg;C, critical at 80&deg;C and above (throttling risk) &mdash; same &quot;rising danger&quot; direction as the other two temperature gauges. These are a reasoned starting point, not yet measured against this robot's actual enclosure/airflow; adjust the <code>breaks</code> array in <code>power.html</code>'s <code>cpuTemp</code> gauge once real readings are in.
+    </p>
+    <h3>Where the data travels</h3>
+    <p>
+      Added as a 13th field to the existing <code>PWR</code> sentence response (<code>cpu_temp</code>), appended after <code>controller_temp</code> and before the trailing availability flag &mdash; no new sentence type, extend-only (same evolution rule as the rest of the protocol, see <a href="/pages/protocole_controle.html">Protocol</a>). <strong>Important distinction:</strong> that trailing flag reflects the <em>Tracer's</em> own availability (RS485 cable connected and answering) &mdash; <code>cpu_temp</code> does not depend on it and is still reported even when the Tracer is unplugged, since nothing about reading Pi&nbsp;#1's own CPU requires the Tracer to be present.
+    </p>
+  </section>
+
+  <section>
+    <h2>History &mdash; battery charge <span class="pending-pill">implemented 2026-10-05</span></h2>
+    <p>
+      Below the live dashboard, two full-width charts trend the battery's state of charge over a rolling day (last 24h) and a rolling month (last 30 days), one sample every 5 minutes. &quot;Rolling&quot; means always full and up to date &mdash; not a calendar day/month that resets at midnight or the 1st and sits mostly empty right after.
+    </p>
+    <h3>Where the data lives</h3>
+    <p>
+      A new SQLite database on Pi&nbsp;#1 (<code>link/power_history.py</code>, table <code>power_log</code>), written by a background logger in the robot's own control server process &mdash; not on Pi&nbsp;#2/robot-webserver. This was a deliberate choice: Pi&nbsp;#1 keeps logging even if the WiFi link between the two Pis is briefly down, since the logger reads straight off its own in-process robot state rather than going over the network. The trade-off is that fetching a chart's data from Pi&nbsp;#2 needs a round trip to Pi&nbsp;#1 (see below), rather than a local read.
+    </p>
+    <h3>Logging is gated on the Tracer, not on a timer</h3>
+    <p>
+      A row is only written when <code>PWR</code>'s own availability flag is true &mdash; i.e. the RS485/Tracer link is actually answering right now. Logging unconditionally every 5 minutes would otherwise fill the history with rows of placeholder zeros every time the cable is unplugged. If the chart above is empty, the most likely reason is simply that the Tracer hasn't reported data yet since the logger started.
+    </p>
+    <h3>Retention</h3>
+    <p>
+      Rows older than <code>POWER_LOG_RETENTION_DAYS</code> (default 395 days, about 13 months) are pruned automatically after every write. At one sample every 5 minutes that's roughly 288 rows/day, ~8,640/month, ~105,000/year &mdash; on the order of 1.3&nbsp;MB/month, so the default window was set generously (a full year plus margin, for season-over-season comparison) rather than tightly, since storage was never the binding constraint here.
+    </p>
+    <h3>Getting data from Pi&nbsp;#1 to the chart</h3>
+    <p>
+      A new <code>HIS</code> sentence (see <a href="/pages/protocole_controle.html">Protocol</a>) lets Pi&nbsp;#2 ask Pi&nbsp;#1 for a page of the day/month window: <code>HIS,&lt;DAY|MONTH&gt;,&lt;offset&gt;</code> in, a count plus up to 100 rows out. It's paginated rather than returning a whole month (~8,640 rows) in one line &mdash; <code>power_history_client.py</code> on Pi&nbsp;#2 loops over pages until it has the full window, and Flask's new <code>GET /api/power_history?period=day|month</code> endpoint (used by this page's own polling, every 5 minutes) hands the assembled rows back as JSON.
+    </p>
+    <h3>Scope of this first version <span class="pending-pill">battery charge only</span></h3>
+    <p>
+      Every other <code>PWR</code> indicator (PV/battery/load voltages, currents, powers, both temperatures, plus Pi&nbsp;#1's own CPU temperature) is already being logged in the same database row &mdash; it's simply not charted yet. The user explicitly scoped the first version of these two charts to battery charge only; adding another chart later is a frontend-only change, no backend or database change needed. GPS position is also logged per sample (nullable, when there's no fix) but deliberately not charted here either, by explicit choice &mdash; a lat/lon pair isn't naturally a time series.
+    </p>
+    <h3>Snapshot geotagging <span class="pending-pill">implemented 2026-10-05</span></h3>
+    <p>
+      Separately, every <code>CAM,SNAP</code> camera snapshot is now recorded in the same database (table <code>snapshots</code>): filename plus whatever GPS fix was live the moment the photo was taken (<code>NULL</code>/<code>NULL</code> if there was no fix yet). This isn't gated on the Tracer at all &mdash; it has nothing to do with the solar charge controller &mdash; and isn't surfaced on this page yet either; it exists so a future view can answer &quot;where was this photo taken&quot; without re-deriving it after the fact.
+    </p>
+  </section>
+
+  <footer>
+    Covers the <code>/power</code> page as of 2026-10-05. Update this page whenever a threshold, formula, or gauge changes on the dashboard.
+  </footer>
+
+</div>
+</body>
+</html>
