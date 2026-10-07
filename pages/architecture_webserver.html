@@ -268,6 +268,11 @@
           <span class="arrow">&mdash;feeds (manual)&rarr;</span>
           <span class="node">.env</span>
         </div>
+        <div class="diagram-row">
+          <span class="node">systemd/robot-webserver.service</span>
+          <span class="arrow">&mdash;launches at boot&rarr;</span>
+          <span class="node main">app.py</span>
+        </div>
       </div>
 
       <div class="diagram-link">
@@ -275,7 +280,7 @@
         &#8595;
       </div>
       <div class="diagram-link">
-        <span class="lbl">HTTP 8000, /media/camera route (app.py)</span>
+        <span class="lbl">HTTP 8000, /media/camera, /media/thumb/&lt;kind&gt;, /media/robot_feed (app.py)</span>
         &#8595;
       </div>
 
@@ -339,7 +344,7 @@
       </div>
     </div>
 
-    <p style="color: var(--muted); font-size: 13.5px;">Since 2026-09-07, sending an <code>RTE</code> route and arming <code>AUTO</code> mode (<code>MOD,AUTO</code> from the console, or the controller's <code>A</code> button &mdash; moved from <code>Y</code> on 2026-09-18, itself moved from the original <code>A</code> on 2026-09-12) really drives the robot: on every GPS fix, <code>link/autopilot.py</code> computes the heading/distance error to the current waypoint and feeds it through two PID loops to produce a motor command, advancing to the next point on arrival. <em>Since 2026-09-12</em>, the gamepad is listened to at all times and manual control always takes priority &mdash; touching a joystick immediately hands control back to manual, mid-route or not, and there is no more <code>MOD</code> button on <code>/control</code> (the site's console can still send <code>MOD,AUTO</code>/<code>MOD,MANUAL</code> by hand). <code>A</code> refuses to arm <code>AUTO</code> if no target exists yet (no <code>NAV</code> point and no <code>RTE</code> route). <em>2026-09-18 remap</em>: <code>B</code> now toggles video recording (<code>CAM,REC_START</code>/<code>CAM,REC_STOP</code>, genuinely implemented as of this date) instead of stopping the robot; <code>X</code> saves the current GPS fix to a waypoint file; <code>Y</code> takes a camera snapshot (<code>CAM,SNAP</code>). There is no dedicated full-stop button on the gamepad any more &mdash; a deliberate simplification, not an oversight; touching a joystick and <code>/control</code>'s own "STOP" button remain the two safety nets, and a stop button can be rebound to a free shoulder button on Pi&nbsp;#1's side if wanted. Pressing <code>START</code> stops the robot, and then additionally powers off the Raspberry Pi itself (a real OS-level shutdown, not just the control scripts) &mdash; see the robot repo's README for the one-time <code>sudo</code> setup this needs, and its troubleshooting notes on the controller sometimes not being detected at all. The "Distance + angle" button (new on 2026-09-12, just above "STOP" on <code>/control</code>) is a second way to build a <code>NAV</code> frame &mdash; it fetches the robot's current position/heading first, then projects a distance and a rotation angle from there, entirely computed client-side on Pi&nbsp;#2; nothing changes here on Pi&nbsp;#1's side once that <code>NAV</code> frame arrives, it's handled exactly like one typed by hand. Known limitation, not hidden: there's no compass/IMU on this robot &mdash; the only heading source is the GPS receiver's own course-over-ground, which is only meaningful while actually moving, and the PID gains are only validated in offline simulation so far. <code>DRV</code> from the console, or the controller's sticks, still drive manually the same way as before.</p>
+    <p style="color: var(--muted); font-size: 13.5px;">Since 2026-09-07, sending an <code>RTE</code> route and arming <code>AUTO</code> mode (<code>MOD,AUTO</code> from the console, or the controller's <code>Y</code> button &mdash; moved from <code>A</code> on 2026-09-12) really drives the robot: on every GPS fix, <code>link/autopilot.py</code> computes the heading/distance error to the current waypoint and feeds it through two PID loops to produce a motor command, advancing to the next point on arrival. <em>Since 2026-09-12</em>, the gamepad is listened to at all times and manual control always takes priority &mdash; touching a joystick immediately hands control back to manual, mid-route or not, and there is no more <code>MOD</code> button on <code>/control</code> (the site's console can still send <code>MOD,AUTO</code>/<code>MOD,MANUAL</code> by hand). <code>Y</code> refuses to arm <code>AUTO</code> if no target exists yet (no <code>NAV</code> point and no <code>RTE</code> route). Pressing <code>B</code> stops the robot, same as <code>STP</code>. Pressing <code>START</code> also stops the robot the same way, and then additionally powers off the Raspberry Pi itself (a real OS-level shutdown, not just the control scripts) &mdash; see the robot repo's README for the one-time <code>sudo</code> setup this needs. The "Distance + angle" button (also new on 2026-09-12, just above "STOP" on <code>/control</code>) is a second way to build a <code>NAV</code> frame &mdash; it fetches the robot's current position/heading first, then projects a distance and a rotation angle from there, entirely computed client-side on Pi&nbsp;#2; nothing changes here on Pi&nbsp;#1's side once that <code>NAV</code> frame arrives, it's handled exactly like one typed by hand. Known limitation, not hidden: there's no compass/IMU on this robot &mdash; the only heading source is the GPS receiver's own course-over-ground, which is only meaningful while actually moving, and the PID gains are only validated in offline simulation so far. <code>DRV</code> from the console, or the controller's sticks, still drive manually the same way as before.</p>
   </section>
 
   <section>
@@ -353,11 +358,11 @@
       <tbody>
         <tr>
           <td class="file">app.py</td>
-          <td>Main Flask application: all routes (<code>/login</code>, <code>/control</code>, <code>/pages</code>, <code>/api/send</code>, <code>/media/*</code>), rendered as inline HTML (no <code>templates/</code> folder). Handles session-based authentication, relays commands from the console to the robot via <code>robot_link.send_command</code>, and proxies the live camera stream from <code>camera/stream_server.py</code>. The <code>/control</code> page (status banner, two-tab Console/TCP console, command buttons) is built entirely server-side then animated with JavaScript. It is the site's single entry point: the other modules are only ever loaded by it.</td>
+          <td>Main Flask application: all routes (<code>/login</code>, <code>/control</code>, <code>/media</code>, <code>/power</code>, <code>/pages</code>, <code>/api/send</code>, <code>/api/power_history</code>, <code>/media/*</code>), rendered as inline HTML (no <code>templates/</code> folder) for <code>/control</code> and <code>/media</code>, or served as-is from <code>pages/</code> for <code>/power</code> and the rest of <code>pages/*.html</code>. Handles session-based authentication, relays commands from the console to the robot via <code>robot_link.send_command</code>, proxies the live camera stream from <code>camera/stream_server.py</code>, and (2026-10-05) proxies/caches geotagged photo and video thumbnails (<code>/media/thumb/&lt;kind&gt;/&lt;filename&gt;</code>) and lists the robot's own on-board camera buffers as JSON (<code>/media/robot_feed</code>) for <code>/media</code>'s &quot;Robot camera&quot; carousel. The <code>/control</code> page (status banner, two-tab Console/TCP console, command buttons, GPS map) is built entirely server-side then animated with JavaScript. It is the site's single entry point: the other modules are only ever loaded by it.</td>
         </tr>
         <tr>
           <td class="file">robot_link.py</td>
-          <td>Minimal TCP client: opens a connection to <code>link/server.py</code> (Pi #1), sends a frame, reads a response line, closes. Used by <code>app.py</code> in the <code>/api/send</code> route, itself called by the console and by the status banner's automatic polling. Builds the frame via <code>nmea.build_sentence</code> and parses it via <code>nmea.parse_sentence</code>. Always returns a dictionary with at least <code>ok</code> and <code>sent</code>, never lets an exception propagate up to Flask.</td>
+          <td>Minimal TCP client: opens a connection to <code>link/server.py</code> (Pi #1), sends a frame, reads a response line, closes. Used by <code>app.py</code> in the <code>/api/send</code> route, itself called by the console, the status banner's automatic polling, the GPS map's waypoint/route/media markers, and the <code>/power</code> page. Builds the frame via <code>nmea.build_sentence</code> and parses it via <code>nmea.parse_sentence</code>. Always returns a dictionary with at least <code>ok</code> and <code>sent</code>, never lets an exception propagate up to Flask.</td>
         </tr>
         <tr>
           <td class="file">nmea.py</td>
@@ -382,6 +387,20 @@
       </tbody>
     </table>
 
+    <h3>Startup (systemd/)</h3>
+    <p style="color: var(--muted); font-size: 13.5px; margin-top: -4px;">Not imported by any Python file &mdash; a unit file read by <code>systemd</code> itself, installed by hand (see <code>README.md</code>, &quot;Lancer le serveur au d&eacute;marrage de la Pi&quot;).</p>
+    <table>
+      <thead>
+        <tr><th>File</th><th>Role</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td class="file">systemd/robot-webserver.service</td>
+          <td>Starts <code>app.py</code> automatically at boot, as the <code>robot</code> user, once the network is up (2026-10-06). Same approach as the robot repo's own <code>systemd/robot.service</code>, adapted to this repo's single-process shape: <code>app.py</code> is the only thing to launch here (unlike Pi #1's <code>link</code> + <code>camera</code> pair), so <code>ExecStart</code> points directly at the project's venv's own <code>python3</code> binary instead of needing a <code>start_robot.sh</code>-style wrapper script. Restarts automatically on crash (<code>Restart=on-failure</code>); logs go to the journal (<code>journalctl -u robot-webserver.service -f</code>).</td>
+        </tr>
+      </tbody>
+    </table>
+
     <h3>Static pages (pages/)</h3>
     <p style="color: var(--muted); font-size: 13.5px; margin-top: -4px;">Served as-is by <code>app.py</code> (route <code>/pages/&lt;file&gt;</code>, no templating) so their own HTML/CSS never breaks; they automatically appear in the <code>/pages</code> listing as soon as an <code>.html</code> file is dropped into this folder.</p>
     <table>
@@ -395,7 +414,7 @@
         </tr>
         <tr>
           <td class="file">rapport_rover_dgps.html</td>
-          <td>Standalone project report (network diagrams for both sites, robot code organization, DGPS/PID/PWM pipeline, PID tuning curves). Generated at a given point in time, not automatically kept in sync with the rest of the code.</td>
+          <td>Standalone project report (network diagrams for both sites, the <code>link</code>/<code>camera</code> process layout, PID tuning). Rewritten 2026-10-06 to match the current architecture; maintained by hand again whenever it changes materially, same as this page.</td>
         </tr>
         <tr>
           <td class="file">architecture_webserver.html</td>
@@ -405,6 +424,7 @@
     </table>
 
     <h3>Media content (media/)</h3>
+    <p style="color: var(--muted); font-size: 13.5px; margin-top: -4px;">The "Video feed"/"Images" panels these two folders feed moved from <code>/control</code> to their own <code>/media</code> page on 2026-10-05 (see <code>_media_page()</code> in <code>app.py</code>) &mdash; <code>/control</code> stays focused on driving the robot. A plain live-camera column came back to <code>/control</code> on 2026-10-06 (a middle column between Controls and Map), but it's unrelated to these two folders: it's just the robot's live MJPEG stream, same proxy (<code>/media/camera</code>) as <code>/media</code>'s own "Video feed" panel, with no recorded-video fallback and nothing of its own stored on disk.</p>
     <table>
       <thead>
         <tr><th>Folder</th><th>Role</th></tr>
@@ -412,11 +432,11 @@
       <tbody>
         <tr>
           <td class="file">media/videos/</td>
-          <td>Videos (<code>.mp4</code>/<code>.webm</code>/<code>.ogg</code>/<code>.mov</code>) played one at a time in a loop in the "Video feed" panel of <code>/control</code>, only when the live camera stream is unavailable. Empty by default (just a <code>.gitkeep</code>) &mdash; shows a "coming soon" placeholder in that case.</td>
+          <td>Videos (<code>.mp4</code>/<code>.webm</code>/<code>.ogg</code>/<code>.mov</code>) played one at a time in a loop in the "Video feed" panel of <code>/media</code>, only when the live camera stream is unavailable. Empty by default (just a <code>.gitkeep</code>) &mdash; shows a "coming soon" placeholder in that case.</td>
         </tr>
         <tr>
           <td class="file">media/images/</td>
-          <td>Images (<code>.jpg</code>/<code>.jpeg</code>/<code>.png</code>/<code>.gif</code>/<code>.webp</code>) shown as a slideshow (3s per image) in the "Images" panel of <code>/control</code>. Unrelated to the robot's <code>CAM,SNAP</code> snapshots (see <a href="/pages/protocole_controle.html">the protocol page</a>), which stay on Pi #1 in <code>camera/tmp/</code> &mdash; this folder is a manual gallery, populated by hand.</td>
+          <td>Images (<code>.jpg</code>/<code>.jpeg</code>/<code>.png</code>/<code>.gif</code>/<code>.webp</code>) shown as a slideshow (3s per image) in the "Images" panel of <code>/media</code>. Unrelated to the robot's own <code>CAM,SNAP</code> snapshots and recordings (see <a href="/pages/protocole_controle.html">the protocol page</a>), which stay on Pi #1's capped camera buffers and are surfaced separately &mdash; as the violet markers on <code>/control</code>'s GPS map (via <code>MED</code>) and as the "Robot camera" carousel on <code>/media</code> (via <code>/media/robot_feed</code>, 2026-10-05) &mdash; this folder is a manual gallery, populated by hand, with no connection to either.</td>
         </tr>
       </tbody>
     </table>

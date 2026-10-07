@@ -305,12 +305,12 @@ minutes_until_empty   = remaining_capacity_Ah / discharge_current_A * 60</div>
     </p>
     <h3>Snapshot geotagging <span class="pending-pill">implemented 2026-10-05</span></h3>
     <p>
-      Separately, every <code>CAM,SNAP</code> camera snapshot is now recorded in the same database (table <code>snapshots</code>): filename plus whatever GPS fix was live the moment the photo was taken (<code>NULL</code>/<code>NULL</code> if there was no fix yet). This isn't gated on the Tracer at all &mdash; it has nothing to do with the solar charge controller &mdash; and isn't surfaced on this page yet either; it exists so a future view can answer &quot;where was this photo taken&quot; without re-deriving it after the fact.
+      Separately, every <code>CAM,SNAP</code> camera snapshot (and, since 2026-10-05, every <code>CAM,REC_START</code>/<code>REC_STOP</code> recording) is recorded in the same database (table <code>snapshots</code>): filename plus whatever GPS fix was live the moment the photo was taken, or the recording started (<code>NULL</code>/<code>NULL</code> if there was no fix yet). This isn't gated on the Tracer at all &mdash; it has nothing to do with the solar charge controller. It isn't charted on this page, but it <em>is</em> now surfaced elsewhere: the violet markers on <code>/control</code>'s GPS map (backed by the <code>MED</code> sentence, see <a href="/pages/protocole_controle.html">Protocol</a>) read straight from this table, and the right-click &quot;delete this point&quot; on one of those markers (<code>MDD</code>) removes the matching row here too, alongside the underlying file on Pi&nbsp;#1 &mdash; so this table never meaningfully outlives what it describes.
     </p>
   </section>
 
   <footer>
-    Covers the <code>/power</code> page as of 2026-10-05. Update this page whenever a threshold, formula, or gauge changes on the dashboard.
+    Covers the <code>/power</code> page as of 2026-10-06. Update this page whenever a threshold, formula, or gauge changes on the dashboard.
   </footer>
 
 </div>

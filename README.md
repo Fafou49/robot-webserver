@@ -27,6 +27,8 @@ robot-webserver/
 ├── media/
 │   ├── videos/            videos a afficher dans l'espace "Video feed" de /control
 │   └── images/            images du diaporama dans l'espace "Images" de /control
+├── systemd/                unite systemd pour le demarrage automatique au boot (voir plus bas)
+│   └── robot-webserver.service
 └── README.md
 ```
 
@@ -34,7 +36,7 @@ robot-webserver/
 
 ```bash
 # copier ce dossier sur la Pi, par exemple via scp depuis votre PC :
-scp -r robot-webserver pi@<IP_DE_LA_PI_N2>:~/
+scp -r robot-webserver robot@<IP_DE_LA_PI_N2>:~/
 
 # puis, connecte en SSH sur la Pi :
 cd ~/robot-webserver
@@ -132,12 +134,14 @@ l'endroit de l'image qui se trouve derrière. Remplacer `static/tech_stack.png`
 par une autre image (même nom, ou changer l'URL dans `_page()`) suffit pour
 en changer.
 
-## Ajouter des vidéos et des images (page /control)
+## Ajouter des vidéos et des images (page /media)
 
 Dépose tes fichiers dans `media/videos/` (`.mp4`, `.webm`, `.ogg`, `.mov`)
 et `media/images/` (`.jpg`, `.jpeg`, `.png`, `.gif`, `.webp`) — ils
-apparaissent automatiquement sur `/control` au prochain chargement de la
-page (pas besoin de redémarrer le serveur) :
+apparaissent automatiquement sur `/media` au prochain chargement de la
+page (pas besoin de redémarrer le serveur). Ces deux panneaux vivaient à
+l'origine dans `/control` ; ils ont déménagé sur leur propre page `/media`
+le 2026-10-05 pour que `/control` reste concentré sur le pilotage :
 
 - **Video feed** : les vidéos sont lues une par une (pas toutes en même
   temps), dans l'ordre alphabétique des noms de fichiers ; à la fin d'une
@@ -148,7 +152,7 @@ page (pas besoin de redémarrer le serveur) :
   secondes, dans l'ordre alphabétique des noms de fichiers.
 
 Ces dossiers sont vides par défaut (juste un `.gitkeep` pour que Git les
-garde) — tant qu'ils sont vides, `/control` affiche les emplacements en
+garde) — tant qu'ils sont vides, `/media` affiche les emplacements en
 pointillés "coming soon".
 
 ## Envoyer des commandes au robot (console de /control)
@@ -181,6 +185,21 @@ par type de trame de commande (STP, DRV, NAV, MOD, PID, CAM, STA), pleine
 largeur, avec un exemple complet en titre — cliquer dessus écrit juste le
 début de la trame (ex. `MOD,`) dans la ligne de commande, à compléter et
 valider avec Entrée.
+
+**Format des points GPS dans la console (2026-10-07) :** `NAV`/`RTE` tapés
+à la main attendent le format `ddmm.mmmm` + lettre de direction du
+protocole (ex. `NAV,4723.492,N,00044.340,W`) — **pas** les degrés décimaux
+affichés juste en dessous dans le bandeau d'état ("actuel"/"cible", ex.
+`47.39153°, -0.73900°`) ni ceux attendus par le fichier "GPS Driving"
+(`lat,lon` décimal, voir plus bas). Avant cette date, copier/coller un
+point décimal affiché ailleurs sur la page dans la console était accepté
+sans erreur et envoyait un point complètement faux (~45x d'écart) — la
+console détecte maintenant ce cas automatiquement et convertit avant
+l'envoi (`normalizeGpsCommand` dans `app.py`), et le robot lui-même
+renvoie une erreur claire (`ERR,22`/`ERR,13` selon la trame, voir
+`pages/protocole_controle.html`) si le point ne ressemble toujours pas à
+un `ddmm.mmmm` valide — utile si quelque chose d'autre que ce site parle
+directement au port TCP du robot.
 
 ## Bandeau d'état (haut de /control)
 
@@ -220,6 +239,43 @@ l'intérieur au lieu d'agrandir la boîte (`min-height: 0` sur les
 conteneurs flex concernés — sans ça, un onglet qui se remplit pousse la
 boîte à grandir hors de l'écran plutôt que de rester en place).
 
+## Barre de progression waypoint-return / GPS Driving (/control, 2026-10-07)
+
+Juste sous le bandeau d'état ci-dessus, et seulement pendant qu'une route
+est effectivement en cours, une barre de progression affiche à quel point
+le robot est avancé dans le retour-waypoints (`BTN_A`) ou la route GPS
+Driving actuellement suivie. Même composant pour les deux cas — seule la
+couleur et le titre changent, lus depuis le champ `RETURN`/`DRIVE` que
+`GRT` renvoie désormais en fin de trame (voir `pages/protocole_controle.html`
+et le README du dépôt `robot`) :
+
+- **Bleu**, titre « Waypoint return (BTN_A) » : le robot retrace ses
+  propres waypoints sauvegardés (`waypoints.txt`).
+- **Rouge**, titre « GPS driving route » : une route `RTE` envoyée/
+  uploadée depuis `/control` — même couleur que les points rouges de la
+  carte GPS ci-dessous.
+
+Entièrement masquée dès qu'aucune route n'est active ou qu'elle vient de
+se terminer (`GRT` renvoie alors une liste vide après `route_index`).
+
+Les points intermédiaires sont espacés sur la barre par **distance GPS
+cumulée réelle** depuis la position courante du robot (haversine, même
+formule que le bandeau d'état), et non par simple comptage — un espacement
+naïf par comptage donnerait une fausse impression quand deux points
+consécutifs sont à 15 m l'un de l'autre et les deux suivants à 80 m.
+Chaque point reprend la numérotation déjà utilisée par la carte GPS
+ci-dessous (« Waypoint 3 », « GPS Driving 5 », calculée à partir de
+`route_index` + la position du point dans la liste complète que `GRT`
+renvoie, pas renumérotée à partir de 1 sur le sous-ensemble restant) pour
+pouvoir croiser les deux vues facilement ; le tout dernier point de la
+route complète est toujours affiché comme « Target », quel que soit le
+mode. Au survol d'un point, une infobulle affiche sa distance depuis la
+position actuelle et une ETA calculée à partir de la vitesse courante du
+robot (champ `speed` de `STA`, même source que le bandeau d'état) —
+« ETA unavailable (stopped) » tant que le robot est quasiment à l'arrêt
+(vitesse < 0.05 km/h), pour éviter une division par (quasi) zéro
+trompeuse.
+
 ## Carte GPS (/control)
 
 À droite du panneau Controls, `/control` affiche une carte GPS simple (une
@@ -234,9 +290,9 @@ interroge le robot toutes les 5 secondes (trames `STA`, `WPT`, `GRT`,
   de la manette (`WPT`), reliés par un trait fin dans l'ordre de
   sauvegarde.
 - **Rouge** : la dernière cible envoyée manuellement ("NAV sent", suivie
-  uniquement côté site) ET la route "GPS Driving" actuellement active
-  (`GRT`) — volontairement regroupées sous une seule couleur, sans
-  distinction de forme.
+  uniquement côté site) ET la route "GPS Driving"/retour-waypoints
+  actuellement active (`GRT`) — volontairement regroupées sous une seule
+  couleur, sans distinction de forme.
 - **Violet** : position GPS des photos/vidéos prises par le robot
   (`MED`) — survoler un point violet télécharge et affiche une miniature
   (image statique pour une vidéo, jamais de lecture automatique) ; le
@@ -258,26 +314,63 @@ qu'on a zoomé manuellement, pour ne pas la faire sauter sous la souris au
 rafraîchissement suivant). Une échelle de distance (bas-gauche de la
 carte, en mètres ou en km) se recalcule à chaque zoom/dézoom.
 
-**Suppression d'un point au clic droit** (2026-10-05) :
+**Suppression d'un point au clic droit** (2026-10-05, étendue aux points
+rouges le 2026-10-06) — toutes les couleurs sauf le robot lui-même sont
+désormais supprimables :
 
 - Sur un point **bleu**, supprime immédiatement ce waypoint du fichier
-  `waypoints.txt` de la Pi n°1 (nouvelle trame `WPD`, par index plutôt
-  que par coordonnées pour éviter tout écart d'arrondi par rapport à ce
-  qui est réellement écrit dans le fichier). S'il était au milieu de la
-  liste, le segment se reforme automatiquement entre ses deux voisins dès
-  le prochain rafraîchissement — la carte reconnecte simplement les
-  points restants dans leur nouvel ordre, rien de spécifique à gérer.
+  `waypoints.txt` de la Pi n°1 (trame `WPD`, par index plutôt que par
+  coordonnées pour éviter tout écart d'arrondi par rapport à ce qui est
+  réellement écrit dans le fichier). S'il était au milieu de la liste, le
+  segment se reforme automatiquement entre ses deux voisins dès le
+  prochain rafraîchissement — la carte reconnecte simplement les points
+  restants dans leur nouvel ordre, rien de spécifique à gérer.
 - Sur un point **violet**, demande confirmation puis supprime la
   photo/vidéo à la fois du buffer caméra de la Pi n°1 (`camera/
   snapshots.py`/`camera/recordings.py`) ET de sa ligne dans la base de
-  données de géolocalisation (nouvelle trame `MDD`) — irréversible.
-- Les points **rouge** (NAV envoyé / GPS Driving) et **vert** (robot) ne
-  sont volontairement pas supprimables par ce menu : rien ne les
-  sauvegarde individuellement côté Pi n°1 (une route "GPS Driving" vit en
-  mémoire tant qu'elle est active, "NAV sent" n'est même suivi que côté
-  site), donc il n'y a rien de propre à "retirer" point par point — le
-  clic droit y laisse simplement apparaître le menu contextuel normal du
-  navigateur.
+  données de géolocalisation (trame `MDD`) — irréversible.
+- Sur un point **rouge "GPS Driving"**, supprime ce point de la route
+  actuellement suivie, en mémoire côté Pi n°1 (nouvelle trame `RTD`, par
+  index dans la liste que renvoie `GRT`) — sans confirmation, comme pour
+  le bleu, puisque rien n'est perdu de façon irréversible sur disque. Si
+  le point supprimé est celui actuellement visé, le robot passe
+  automatiquement au suivant dans la liste ; si c'était le dernier, la
+  route se termine proprement (voir `RobotState.delete_route_point()`
+  dans le dépôt `robot` pour le détail). N'écrit jamais dans
+  `waypoints.txt`, même pour un point issu d'un retour-waypoints (`BTN_A`)
+  — seul `WPD` touche ce fichier.
+- Sur le point rouge **"NAV sent"**, il n'y a rien à envoyer au robot : ce
+  point n'est suivi que par cet onglet du navigateur (perdu de toute
+  façon au rechargement de la page), donc "supprimer" l'oublie simplement
+  côté site et redessine la carte sans lui.
+- Le point **vert** (position actuelle du robot) n'est volontairement pas
+  supprimable par ce menu — le clic droit y laisse apparaître le menu
+  contextuel normal du navigateur.
+
+## Carte d'ensoleillement (/control, 2026-10-07)
+
+Nouvelle case à cocher "Solar exposure map" sous la légende de la carte
+GPS (voir section précédente) : une fois cochée, superpose une grille de
+carrés semi-transparents (environ 5 m de côté) derrière tous les points et
+traits existants, chaque carré représentant la puissance PV moyenne
+mesurée à cet endroit par le robot (voir `link/solar_map.py` et
+l'extension de `link/power_history.py` dans le dépôt `robot` pour la façon
+dont cette grille est construite côté Pi n°1). Dégradé séquentiel à quatre
+teintes — bleu-nuit foncé (faible puissance) → violet → orange → jaune vif
+(forte puissance) — normalisé sur le min/max des cellules reçues à cet
+instant (le wattage réel du panneau n'est pas connu côté site). Une petite
+légende (dégradé + nombre de cellules/points) apparaît automatiquement dès
+que des données sont disponibles.
+
+Données récupérées via la nouvelle route `GET /api/solar_map` (lecture
+seule, accessible aussi aux comptes "viewer" comme `/api/power_history`),
+qui boucle côté serveur Flask sur la trame paginée `SMP` du Pi n°1
+(`power_history_client.py`, fonction `fetch_solar_map()` — même principe
+que `fetch_power_history()`). Interrogée toutes les 30 secondes tant que la
+case est cochée (la grille elle-même ne change qu'au rythme du recalcul
+sur le Pi n°1, toutes les 5 minutes et seulement quand le robot est
+inactif — un intervalle de 5 s comme pour la carte elle-même serait inutile)
+; aucune requête n'est envoyée tant que la case est décochée.
 
 ## Vignette caméra du robot (panneau droit de /media)
 
@@ -323,11 +416,11 @@ Sa navigation (2026-10-05) ne contient plus que "Control page" et
 ces deux pages restent accessibles, mais uniquement via le sommaire
 `/pages`, comme le reste des pages de référence.
 
-## Caméra en direct (panneau "Video feed" de /control)
+## Caméra en direct (panneau "Video feed" de /media)
 
 Si une webcam est branchée sur le robot (Raspberry Pi n°1) et que son
 script de diffusion tourne (`python3 -m camera` dans le dépôt `robot`,
-voir son README), le panneau "Video feed" de `/control` affiche
+voir son README), le panneau "Video feed" de `/media` affiche
 automatiquement ce flux en direct, à la place de la playlist vidéo
 enregistrée — sans avoir besoin de recharger la page. Techniquement, le
 navigateur ne parle qu'à ce serveur (route `/media/camera`), qui relaie le
@@ -348,9 +441,109 @@ CAMERA_STREAM_PATH=/stream.mjpg
 (`ROBOT_HOST`, déjà configuré ci-dessus pour les commandes, est réutilisé
 pour joindre la caméra -- même Pi, port différent.)
 
-## Lancer le serveur au démarrage de la Pi (optionnel, à faire plus tard)
+## Colonne caméra de /control (2026-10-06)
 
-Pour que le serveur redémarre automatiquement avec la Raspberry Pi (utile en
-usage réel, pas indispensable pour tester), la méthode standard est un
-service `systemd` — à mettre en place une fois l'application plus aboutie
-(notamment une fois l'envoi d'ordres au robot ajouté).
+Piloter le robot sans voir où il pointe n'a pas vraiment de sens, donc
+`/control` a maintenant lui aussi une colonne caméra — au milieu, entre
+Controls et Map (les trois colonnes se partagent la largeur à parts
+égales). Même flux, même route (`/media/camera`), mais volontairement plus
+simple que le panneau "Video feed" de `/media` ci-dessus : pas de
+secours sur une playlist vidéo enregistrée ici — une vieille vidéo
+pendant qu'on est en train de piloter serait plus trompeuse qu'utile. Tant
+que le flux n'est pas joignable, la colonne affiche juste "Camera
+unavailable — retrying..." et retente toutes les 5 secondes, exactement
+comme `/media`.
+
+Au passage, un bug a été corrigé sur `/media` en même temps : le message
+"No photos/videos on the robot yet" du carrousel "Robot camera" restait
+affiché EN MÊME TEMPS que la photo/vidéo une fois qu'elle arrivait (une
+règle CSS plus spécifique empêchait l'attribut `hidden` de vraiment
+masquer l'élément), ce qui poussait l'image hors du centre de son cadre.
+Les photos/vidéos du robot s'affichent maintenant correctement centrées,
+seules, dans leur boîte.
+
+## Lancer le serveur au démarrage de la Pi (`systemd/robot-webserver.service`, 2026-10-06)
+
+Pour que `app.py` démarre tout seul à chaque allumage de la Pi n°2 (sans
+avoir besoin d'ouvrir un terminal), la même solution que sur la Pi n°1
+(robot repo, `systemd/robot.service` — voir son README, section
+"Démarrage automatique au boot") : un service `systemd`. Il démarre avant
+toute session graphique/SSH, et redémarre automatiquement le site si le
+processus plante.
+
+**Différence avec la Pi n°1** : là-bas, `run_robot.sh` lance DEUX
+processus (le serveur de commandes et la caméra), donc un script
+intermédiaire (`start_robot.sh`) est nécessaire pour activer
+l'environnement virtuel puis les lancer tous les deux. Ici, `app.py` est
+un unique processus Flask, donc pas besoin d'un script équivalent : le
+service pointe directement sur l'exécutable `python3` DU venv
+(`venv/bin/python3`), ce qui revient au même que `source
+venv/bin/activate` (l'activation ne fait que modifier le `PATH` d'un
+shell interactif ; lancer directement le `python3` du venv obtient le
+même résultat, sans avoir besoin d'un shell pour `source`).
+
+**Chemins à vérifier avant d'installer**, dans
+`systemd/robot-webserver.service` :
+```ini
+User=robot
+Group=robot
+WorkingDirectory=/home/robot/robot-webserver
+ExecStart=/home/robot/robot-webserver/venv/bin/python3 /home/robot/robot-webserver/app.py
+```
+Adapter ces chemins si ce projet ne vit pas exactement dans
+`/home/robot/robot-webserver` sur cette Pi, ou si le compte utilisateur
+n'est pas `robot` (vérifier aussi que le venv s'appelle bien `venv/` et
+pas `.venv/`, voir "Installation" plus haut).
+
+**Installation (à faire une fois, sur la Pi, avec `sudo`)** :
+```bash
+sudo cp systemd/robot-webserver.service /etc/systemd/system/robot-webserver.service
+sudo systemctl daemon-reload
+sudo systemctl enable robot-webserver.service   # démarre automatiquement à chaque boot
+sudo systemctl start robot-webserver.service    # démarre tout de suite, sans attendre un reboot
+```
+
+**Vérifier que ça tourne** :
+```bash
+sudo systemctl status robot-webserver.service   # actif ou non, dernières lignes de log
+journalctl -u robot-webserver.service -f        # logs en direct (Ctrl+C pour arrêter de suivre)
+```
+
+**Arrêter/redémarrer/désactiver** :
+```bash
+sudo systemctl stop robot-webserver.service       # arrête maintenant (jusqu'au prochain boot/start)
+sudo systemctl restart robot-webserver.service    # redémarre tout de suite (utile après un `git pull`)
+sudo systemctl disable robot-webserver.service    # ne redémarre plus tout seul au boot
+```
+
+**Points d'attention** :
+- Le service tourne sous l'utilisateur `robot` (`User=robot` dans
+  `robot-webserver.service`, même convention que le service de la Pi
+  n°1 — à adapter si ce projet tourne sous un autre nom d'utilisateur
+  sur cette Pi).
+- `app.py` charge `.env` (identifiants de login, `ROBOT_HOST`,
+  `FLASK_SECRET_KEY`...) via `load_dotenv()`, qui lit le fichier `.env`
+  du répertoire courant — `WorkingDirectory=` dans le service DOIT donc
+  rester exactement le dossier du projet, sinon `.env` ne se charge pas
+  et le site démarre avec des identifiants/réglages vides.
+- Si le service démarre (`systemctl status` actif) mais que le site ne
+  répond pas, vérifier d'abord `journalctl -u robot-webserver.service
+  -f` — une cause fréquente est un `.env` manquant ou incomplet (voir
+  "Configurer le login" plus haut), puisque Flask démarre quand même
+  mais rejette alors toute tentative de connexion.
+- `Restart=on-failure` ne redémarre qu'en cas de plantage réel du
+  processus Python (crash, exception non gérée) — un `sudo systemctl
+  stop` reste un arrêt normal, pas un crash, donc pas de redémarrage
+  intempestif juste après.
+- Penser à `sudo systemctl restart robot-webserver.service` après chaque
+  mise à jour du code sur cette Pi (`git pull`, ou copie manuelle d'un
+  nouveau `app.py`) — le service ne relit pas les fichiers tout seul, il
+  faut le redémarrer pour que le nouveau code soit pris en compte.
+- **Non testé sur une vraie Raspberry Pi** (même honnêteté que pour le
+  service équivalent sur la Pi n°1) : `robot-webserver.service` a été
+  relu et vérifié (syntaxe `.ini`, chemins cohérents avec la section
+  "Installation" ci-dessus), mais l'installation `systemd` elle-même —
+  permissions, comportement réel au boot — n'a pas pu être vérifiée dans
+  cet environnement (pas de vraie Pi ni de `systemd` actif ici). À
+  tester avec un vrai redémarrage avant de s'y fier pour un déploiement
+  sur le terrain.

@@ -39,8 +39,14 @@ MAX_PAGES = 1000
 
 
 class PowerHistoryError(RuntimeError):
-    """Raised when Pi #1 can't be reached, or its HIS response doesn't
-    match the contract this client expects."""
+    """Raised when Pi #1 can't be reached, or its HIS/SMP response
+    doesn't match the contract this client expects."""
+
+# Must match link/power_history.py's solar_map_cells column order
+# exactly (same hand-kept-in-sync convention as FIELD_ORDER above) --
+# how a flat row of SMP fields gets decoded back into named values.
+SOLAR_MAP_FIELD_ORDER = ("lat", "lon", "avg_pv_power", "sample_count", "last_ts")
+SOLAR_MAP_ROW_SIZE = len(SOLAR_MAP_FIELD_ORDER)
 
 
 def fetch_power_history(period: str, host: str, port: int, timeout: float = 5.0) -> list:
@@ -88,3 +94,52 @@ def fetch_power_history(period: str, host: str, port: int, timeout: float = 5.0)
             return rows
 
     raise PowerHistoryError("HIS_TOO_MANY_PAGES")
+
+
+def fetch_solar_map(host: str, port: int, timeout: float = 5.0) -> list:
+    """Returns every solar-exposure-map grid cell currently known to
+    Pi #1 (see link/server.py's SMP sentence and link/power_history.py's
+    solar_map_cells table/recompute_solar_map()), as a list of dicts
+    keyed by SOLAR_MAP_FIELD_ORDER. Same pagination-loop shape as
+    fetch_power_history() above -- see that function's own docstring --
+    just against SMP instead of HIS: SMP only takes an offset (no
+    period field), since the grid itself has no time window -- Pi #1's
+    own retention/pruning is what keeps it from growing unbounded, not
+    this read. Raises PowerHistoryError on any failure (connection
+    refused, malformed response, Pi #1 reporting an ERR sentence) --
+    callers (robot-webserver's /api/solar_map) turn that into a clean
+    JSON error rather than a 500."""
+    rows = []
+    offset = 0
+    for _ in range(MAX_PAGES):
+        result = send_command(f"SMP,{offset}", host, port, timeout=timeout)
+        if not result["ok"]:
+            raise PowerHistoryError(result.get("error", "SMP_FAILED"))
+
+        fields = result.get("fields") or []
+        if len(fields) < 3:
+            raise PowerHistoryError(f"SMP_MALFORMED_RESPONSE:{fields}")
+
+        try:
+            total_count = int(fields[0])
+            resp_offset = int(fields[1])
+            returned_count = int(fields[2])
+        except ValueError:
+            raise PowerHistoryError(f"SMP_MALFORMED_RESPONSE:{fields}")
+
+        row_fields = fields[3:]
+        if len(row_fields) != returned_count * SOLAR_MAP_ROW_SIZE:
+            raise PowerHistoryError("SMP_FIELD_COUNT_MISMATCH")
+
+        for i in range(returned_count):
+            raw = row_fields[i * SOLAR_MAP_ROW_SIZE:(i + 1) * SOLAR_MAP_ROW_SIZE]
+            row = dict(zip(SOLAR_MAP_FIELD_ORDER, (float(value) for value in raw)))
+            row["sample_count"] = int(row["sample_count"])
+            row["last_ts"] = int(row["last_ts"])
+            rows.append(row)
+
+        offset = resp_offset + returned_count
+        if returned_count == 0 or offset >= total_count:
+            return rows
+
+    raise PowerHistoryError("SMP_TOO_MANY_PAGES")

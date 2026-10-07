@@ -27,7 +27,7 @@ from dotenv import load_dotenv
 from flask import Flask, Response, abort, jsonify, redirect, request, send_from_directory, session, url_for
 from werkzeug.security import check_password_hash
 
-from power_history_client import PowerHistoryError, fetch_power_history
+from power_history_client import PowerHistoryError, fetch_power_history, fetch_solar_map
 from robot_link import send_command
 
 load_dotenv()
@@ -333,7 +333,11 @@ def _control_page(role="admin"):
     The Video feed / Images panels that used to live inline in this page
     moved out to their own /media page on 2026-10-05 (see _media_page
     below and the "Media" nav link) so this page stays focused on driving
-    the robot.
+    the robot. A plain live-camera column came back on 2026-10-06
+    (explicit user request: actually piloting the robot needs to see
+    where it's pointed) -- deliberately NOT the full Video feed panel
+    from /media, just the bare live stream with no recorded-video
+    fallback, in a new middle column between Controls and Map.
 
     role: "admin" (full access) or "viewer" (read-only guest account, see
     WEBSERVER_VIEWER_USERNAME above) -- a viewer never sees the Controls
@@ -469,6 +473,166 @@ def _control_page(role="admin"):
       white-space: nowrap;
     }}
 
+    /* Waypoint-return / GPS-driving-route progress bar (2026-10-07): sits
+       directly under the status bar, same left/right padding and
+       border-bottom rhythm so it reads as part of the same status region
+       rather than a new panel. Hidden entirely (see updateReturnProgress()
+       below) whenever there's no active route or it's just been
+       completed. Two modes, same component: GRT's trailing mode field
+       (see link/server.py) is "RETURN" for a BTN_A waypoint return (blue,
+       matching .map-dot-waypoint) or "DRIVE" for an uploaded/typed RTE
+       GPS driving route (red, matching .map-dot-route) -- only the color
+       and title/legend text change, the distance/ETA math underneath is
+       identical. Intermediate points are spaced by real cumulative
+       distance (haversine from the robot's live position), not by
+       count. */
+    .return-progress {{
+      padding: 10px 24px 14px;
+      border-bottom: 1px solid #30363d;
+    }}
+    .return-progress-head {{
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      margin-bottom: 10px;
+      flex-wrap: wrap;
+      gap: 6px;
+    }}
+    .return-progress-title {{
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.07em;
+      color: #8b949e;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }}
+    .return-progress-title .dot {{
+      width: 7px; height: 7px; border-radius: 50%;
+      background: #58a6ff;
+      box-shadow: 0 0 0 3px rgba(88, 166, 255, 0.18);
+    }}
+    .return-progress.mode-route .return-progress-title .dot {{
+      background: #f85149;
+      box-shadow: 0 0 0 3px rgba(248, 81, 73, 0.18);
+    }}
+    .return-progress.mode-route .return-track-fill {{ background: #f85149; }}
+    .return-progress.mode-route .return-point:not(.target) {{ background: #f85149; }}
+    .return-progress-stat {{
+      font-family: "Courier New", monospace;
+      font-size: 13px;
+      color: #e6edf3;
+    }}
+    .return-progress-stat .muted {{ color: #8b949e; font-family: system-ui, sans-serif; font-size: 11.5px; }}
+
+    .return-track-wrap {{
+      position: relative;
+      padding: 14px 0 26px;
+    }}
+    .return-track {{
+      position: relative;
+      height: 6px;
+      background: #21262d;
+      border-radius: 3px;
+      overflow: visible;
+    }}
+    .return-track-fill {{
+      position: absolute;
+      left: 0; top: 0; bottom: 0;
+      background: #58a6ff;
+      border-radius: 3px;
+      transition: width 0.6s ease;
+    }}
+    /* Current-position marker: always the left/0% end -- 0% is the
+       position the route/return started from as of THIS poll, not a
+       continuously-recomputed "current position" dragged along a fixed
+       scale (each poll re-derives a fresh "distance from here" snapshot,
+       so the fill is simply reset to 0% every time rather than
+       animated). */
+    .return-current {{
+      position: absolute;
+      top: 50%;
+      left: 0;
+      width: 13px; height: 13px;
+      margin-left: -6.5px; margin-top: -6.5px;
+      border-radius: 50%;
+      background: #0d1117;
+      border: 2px solid #3fb950;
+      box-shadow: 0 0 0 3px rgba(63, 185, 80, 0.18);
+    }}
+    .return-point {{
+      position: absolute;
+      top: 50%;
+      width: 10px; height: 10px;
+      margin-left: -5px; margin-top: -5px;
+      border-radius: 50%;
+      background: #58a6ff;
+      border: 1px solid #1b1f24;
+      cursor: default;
+    }}
+    .return-point.target {{
+      width: 12px; height: 12px;
+      margin-left: -6px; margin-top: -6px;
+      background: #3fb950;
+    }}
+    .return-point-label {{
+      position: absolute;
+      top: 16px;
+      transform: translateX(-50%);
+      font-family: "Courier New", monospace;
+      font-size: 10.5px;
+      color: #8b949e;
+      white-space: nowrap;
+      text-align: center;
+    }}
+    .return-point-label .idx {{ color: #e6edf3; }}
+
+    /* Hover tooltip on a point -- width:max-content is required here: an
+       absolutely-positioned ::after with no explicit width otherwise
+       shrink-wraps to its tiny containing block (the 10px dot itself),
+       which wraps white-space:pre-line onto one word per line. */
+    .return-point::after {{
+      content: attr(data-tip);
+      position: absolute;
+      bottom: 22px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: #161b22;
+      border: 1px solid #30363d;
+      color: #e6edf3;
+      font-family: "Courier New", monospace;
+      font-size: 11px;
+      padding: 4px 8px;
+      border-radius: 5px;
+      white-space: pre-line;
+      width: max-content;
+      max-width: 320px;
+      text-align: left;
+      line-height: 1.5;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.12s ease;
+      z-index: 5;
+    }}
+    .return-point:hover::after {{ opacity: 1; }}
+
+    .return-legend {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 16px;
+      font-size: 11px;
+      color: #8b949e;
+      margin-top: 2px;
+    }}
+    .return-legend span {{ display: inline-flex; align-items: center; gap: 5px; }}
+    .return-legend .swatch {{ display: inline-block; width: 9px; height: 9px; border-radius: 50%; border: 1px solid #1b1f24; }}
+    .return-legend .swatch.blue {{ background: #58a6ff; }}
+    .return-legend .swatch.red {{ background: #f85149; }}
+    .return-legend .ring {{
+      display: inline-block; width: 9px; height: 9px; border-radius: 50%;
+      border: 2px solid #3fb950; background: #0d1117;
+    }}
+
     /* Main area: top ~two thirds, panels flow left to right. */
     .main-area {{
       flex: 2;
@@ -512,6 +676,35 @@ def _control_page(role="admin"):
       padding: 12px;
       line-height: 1.6;
     }}
+    /* Bugfix (2026-10-06, see the identical fix + full explanation in
+       _media_page's own copy of this rule): `display: flex` above beats
+       the browser's default "[hidden] {{ display: none }}" on specificity,
+       so toggling cameraPlaceholder.hidden below would otherwise do
+       nothing. */
+    .panel .placeholder[hidden] {{ display: none; }}
+
+    /* Camera panel (2026-10-06, explicit user request): a middle column
+       between Controls and Map showing the robot's live feed, so driving
+       doesn't require switching to the separate /media page to see where
+       the robot is pointed. Deliberately simpler than /media's own
+       "Video feed" panel: no recorded-video fallback here (stale footage
+       is actively misleading while actually piloting) -- just the live
+       stream, or a plain placeholder while it's unavailable. */
+    .camera-feed-area {{
+      width: 100%;
+      height: 100%;
+      min-height: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }}
+    .camera-stream {{
+      max-width: 100%;
+      max-height: 100%;
+      border-radius: 8px;
+      object-fit: contain;
+    }}
+    .camera-stream[hidden] {{ display: none; }}
 
     /* GPS map panel (2026-10-05): overrides .panel's own center/center
        alignment (meant for a single centered placeholder) so the map
@@ -566,6 +759,61 @@ def _control_page(role="admin"):
     .map-dot-waypoint {{ background: #58a6ff; }}
     .map-dot-route {{ background: #f85149; }}
     .map-dot-media {{ background: #8957e5; }}
+
+    /* Solar-exposure map overlay (2026-10-07, explicit user request):
+       a toggle row under the existing map-legend, shown whenever the
+       map panel is visible (not gated on the checkbox itself -- the
+       legend/gradient only has to look right once data has loaded, see
+       updateSolarLegend() below). Same dashed-divider trick as
+       .return-progress's own panel-within-a-panel styling elsewhere in
+       this file, to visually separate it from the legend above. */
+    .solar-toggle-row {{
+      flex: 0 0 auto;
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      flex-wrap: wrap;
+      font-size: 11px;
+      color: #8b949e;
+      padding-top: 6px;
+      border-top: 1px dashed #30363d;
+    }}
+    .solar-toggle-label {{
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 12px;
+      color: #c9d1d9;
+      cursor: pointer;
+      user-select: none;
+    }}
+    .solar-toggle-label input {{ accent-color: #ffb454; cursor: pointer; }}
+    .solar-legend {{
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 10.5px;
+      color: #8b949e;
+    }}
+    /* Without this, the [hidden] attribute's own display:none loses to
+       the class rule above (same specificity, class rule comes later in
+       the cascade) -- same fix this file already applies to
+       .camera-stream[hidden] above for the exact same reason. */
+    .solar-legend[hidden] {{ display: none; }}
+    /* Sequential scale (one tonal journey, dark -> warm/bright): low PV
+       power reads as dark navy, high PV power as bright yellow -- same
+       4-stop gradient drawn both here (CSS, for the legend swatch) and
+       in JS (solarColorForRatio() below, for the actual grid squares,
+       which need a single interpolated color per cell rather than a
+       fixed CSS gradient). */
+    .solar-gradient-bar {{
+      width: 90px;
+      height: 8px;
+      border-radius: 4px;
+      border: 1px solid #1b1f24;
+      background: linear-gradient(to right, #1a1f3d, #6a3d9a, #e8572c, #ffd23f);
+    }}
+    .solar-legend-note {{ color: #656d76; font-style: italic; }}
 
     /* Distance scale bar (bottom-left of the map, drawn fresh on every
        redraw -- see drawMapScaleBar() below): plain SVG line/text
@@ -864,10 +1112,39 @@ def _control_page(role="admin"):
     </div>
   </div>
 
+  <!-- Waypoint-return / GPS-driving-route progress bar (2026-10-07): hidden
+       by default, shown by updateReturnProgress() (see script below) only
+       while GRT reports a non-empty route still to drive. -->
+  <div class="return-progress" id="returnProgress" hidden>
+    <div class="return-progress-head">
+      <span class="return-progress-title"><span class="dot" id="returnModeDot"></span><span id="returnModeTitle">Waypoint return (BTN_A)</span></span>
+      <span class="return-progress-stat" id="returnStatLine">--</span>
+    </div>
+    <div class="return-track-wrap">
+      <div class="return-track">
+        <div class="return-track-fill" id="returnTrackFill"></div>
+        <div class="return-current"></div>
+        <div id="returnPointsLayer"></div>
+      </div>
+    </div>
+    <div class="return-legend">
+      <span><span class="ring"></span>Current position</span>
+      <span><span class="swatch" id="returnLegendSwatch"></span><span id="returnLegendPointLabel">Remaining waypoint</span></span>
+      <span><span class="swatch" style="background:#3fb950;"></span>Target / final point</span>
+    </div>
+  </div>
+
   <div class="main-area">
     <div class="panel">
       <h2>Controls</h2>
       {controls_html}
+    </div>
+    <div class="panel">
+      <h2>Camera</h2>
+      <div class="camera-feed-area">
+        <img class="camera-stream" id="cameraStream" alt="Live camera feed" hidden>
+        <div class="placeholder" id="cameraPlaceholder">Camera unavailable &mdash; retrying...</div>
+      </div>
     </div>
     <div class="panel panel-map">
       <h2>Map</h2>
@@ -879,7 +1156,19 @@ def _control_page(role="admin"):
           <span><i class="map-dot map-dot-waypoint"></i>Waypoints</span>
           <span><i class="map-dot map-dot-route"></i>NAV / GPS Driving</span>
           <span><i class="map-dot map-dot-media"></i>Photos / Videos</span>
-          <span class="map-hint">Scroll to zoom &middot; double-click to reset &middot; right-click a waypoint/photo/video to delete</span>
+          <span class="map-hint">Scroll to zoom &middot; double-click to reset &middot; right-click any point to delete</span>
+        </div>
+        <div class="solar-toggle-row">
+          <label class="solar-toggle-label">
+            <input type="checkbox" id="solarMapToggle">
+            Solar exposure map
+          </label>
+          <span class="solar-legend" id="solarLegend" hidden>
+            Low
+            <span class="solar-gradient-bar"></span>
+            High
+            <span class="solar-legend-note" id="solarLegendNote"></span>
+          </span>
         </div>
       </div>
     </div>
@@ -911,6 +1200,35 @@ def _control_page(role="admin"):
     }}
     updateClock();
     setInterval(updateClock, 1000);
+
+    // Live camera feed (2026-10-06): same proxied-MJPEG-through-/media/camera
+    // approach as /media's own "Video feed" panel (see _media_page below),
+    // just without that page's recorded-video fallback -- see the CSS
+    // comment above .camera-feed-area for why. Retries on its own every
+    // few seconds until the robot's camera script is actually reachable.
+    const cameraStream = document.getElementById("cameraStream");
+    const cameraPlaceholder = document.getElementById("cameraPlaceholder");
+    const CAMERA_URL = "{url_for('media_camera')}";
+    const CAMERA_RETRY_MS = 5000;
+
+    function tryCameraStream() {{
+      // Cache-bust so each retry is a fresh connection attempt instead of
+      // reusing a broken one.
+      cameraStream.src = CAMERA_URL + "?t=" + Date.now();
+    }}
+
+    cameraStream.addEventListener("load", () => {{
+      cameraStream.hidden = false;
+      cameraPlaceholder.hidden = true;
+    }});
+
+    cameraStream.addEventListener("error", () => {{
+      cameraStream.hidden = true;
+      cameraPlaceholder.hidden = false;
+      setTimeout(tryCameraStream, CAMERA_RETRY_MS);
+    }});
+
+    tryCameraStream();
 
     function timestamp() {{
       const now = new Date();
@@ -980,6 +1298,11 @@ def _control_page(role="admin"):
     let lastNavSent = null;
 
     async function sendToRobot(command, {{logToConsole = false}} = {{}}) {{
+      // Auto-fixes a decimal-degrees NAV/RTE point before it ever leaves
+      // the browser -- see normalizeGpsCommand() below for why. A no-op
+      // for GPS Driving/Distance+angle (already correct NMEA) and for
+      // anything that isn't NAV/RTE.
+      command = normalizeGpsCommand(command);
       let data;
       try {{
         const res = await fetch("{url_for('api_send')}", {{
@@ -1225,6 +1548,247 @@ def _control_page(role="admin"):
     const MAP_NS = "http://www.w3.org/2000/svg";
     const MAP_VIEW_SIZE = 400;
     const MAP_COLORS = {{robot: "#3fb950", waypoint: "#58a6ff", route: "#f85149", media: "#8957e5"}};
+
+    // ---- Solar-exposure map overlay (2026-10-07, explicit user request) ----
+    // Toggleable grid of colored squares showing average PV power per
+    // ~5m cell (see link/solar_map.py + link/power_history.py's
+    // solar_map_cells, fetched via /api/solar_map -> power_history_
+    // client.py's fetch_solar_map() -> link/server.py's SMP sentence).
+    // Drawn as its own layer, behind every existing marker/line (see
+    // drawSolarCells() below), and deliberately excluded from the map's
+    // own auto-fit bounds computation (computeBounds() only ever sees
+    // mapLastPoints, never solarCells) -- the overlay should never be
+    // what decides the zoom level.
+    const solarMapToggle = document.getElementById("solarMapToggle");
+    const solarLegend = document.getElementById("solarLegend");
+    const solarLegendNote = document.getElementById("solarLegendNote");
+    let solarMapEnabled = false;
+    let solarCells = []; // [{{lat, lon, avg_pv_power, sample_count, last_ts}}, ...]
+    let solarPollBusy = false;
+
+    // Sequential scale, one tonal journey from dark (low PV power) to
+    // bright warm (high PV power) -- same 4 stops as the CSS
+    // .solar-gradient-bar legend swatch above, interpolated here in
+    // plain RGB since each cell needs one specific color rather than a
+    // fixed CSS gradient.
+    const SOLAR_COLOR_STOPS = [
+      [0.00, [0x1a, 0x1f, 0x3d]],
+      [0.33, [0x6a, 0x3d, 0x9a]],
+      [0.66, [0xe8, 0x57, 0x2c]],
+      [1.00, [0xff, 0xd2, 0x3f]],
+    ];
+
+    function solarColorForRatio(t) {{
+      t = Math.max(0, Math.min(1, t));
+      for (let i = 0; i + 1 < SOLAR_COLOR_STOPS.length; i++) {{
+        const [t0, c0] = SOLAR_COLOR_STOPS[i];
+        const [t1, c1] = SOLAR_COLOR_STOPS[i + 1];
+        if (t <= t1 || i + 2 === SOLAR_COLOR_STOPS.length) {{
+          const span = t1 - t0 || 1;
+          const frac = Math.max(0, Math.min(1, (t - t0) / span));
+          const [r0, g0, b0] = c0, [r1, g1, b1] = c1;
+          const r = Math.round(r0 + (r1 - r0) * frac);
+          const g = Math.round(g0 + (g1 - g0) * frac);
+          const b = Math.round(b0 + (b1 - b0) * frac);
+          return `rgb(${{r}}, ${{g}}, ${{b}})`;
+        }}
+      }}
+      return "rgb(255, 210, 63)";
+    }}
+
+    // Draws every currently-known solar cell as a square centered on its
+    // own (lat, lon), sized from SOLAR_MAP_CELL_SIZE_DEG via the SAME
+    // projection currently in effect for every other marker -- inserted
+    // as the new first child of the <svg> (i.e. the bottom-most layer,
+    // behind the waypoint/route lines and every point marker already
+    // drawn by the time this runs, see redrawMap() below). Color is
+    // relative to THIS batch's own min/max avg_pv_power (same
+    // "normalize to what's actually on screen" spirit as
+    // drawMapScaleBar()'s "nice number" picking above), since the
+    // panel's absolute wattage rating isn't known here.
+    const SOLAR_MAP_CELL_SIZE_DEG = 0.000045; // must match link/solar_map.py's own constant
+
+    function drawSolarCells(project) {{
+      if (!solarMapEnabled || solarCells.length === 0) return;
+      const powers = solarCells.map((c) => c.avg_pv_power);
+      const minP = Math.min(...powers), maxP = Math.max(...powers);
+      const span = (maxP - minP) || 1;
+
+      const group = document.createElementNS(MAP_NS, "g");
+      group.setAttribute("opacity", "0.78");
+      for (const cell of solarCells) {{
+        const [cx, cy] = project(cell.lat, cell.lon);
+        const [cx2, cy2] = project(
+          cell.lat + SOLAR_MAP_CELL_SIZE_DEG, cell.lon + SOLAR_MAP_CELL_SIZE_DEG
+        );
+        const w = Math.abs(cx2 - cx) || 2, h = Math.abs(cy2 - cy) || 2;
+        const rect = document.createElementNS(MAP_NS, "rect");
+        rect.setAttribute("x", cx - w / 2);
+        rect.setAttribute("y", cy - h / 2);
+        rect.setAttribute("width", w);
+        rect.setAttribute("height", h);
+        rect.setAttribute("fill", solarColorForRatio((cell.avg_pv_power - minP) / span));
+        group.appendChild(rect);
+      }}
+      // Inserted before whatever is currently the first child (the
+      // waypoint/route lines, drawn earlier in redrawMap()) so the
+      // whole overlay sits at the very back -- see this function's own
+      // comment above.
+      gpsMapSvg.insertBefore(group, gpsMapSvg.firstChild);
+    }}
+
+    function updateSolarLegendNote() {{
+      if (!solarMapEnabled || solarCells.length === 0) {{
+        solarLegend.hidden = true;
+        return;
+      }}
+      const totalSamples = solarCells.reduce((sum, c) => sum + c.sample_count, 0);
+      solarLegendNote.textContent =
+        `(avg PV power per ~5m cell, ${{solarCells.length}} cell` +
+        `${{solarCells.length === 1 ? "" : "s"}}, ${{totalSamples}} point` +
+        `${{totalSamples === 1 ? "" : "s"}})`;
+      solarLegend.hidden = false;
+    }}
+
+    async function pollSolarMap() {{
+      if (!solarMapEnabled || solarPollBusy) return;
+      solarPollBusy = true;
+      try {{
+        const res = await fetch("/api/solar_map");
+        const data = await res.json();
+        if (data.ok) {{
+          solarCells = data.cells || [];
+          updateSolarLegendNote();
+          redrawMap();
+        }}
+      }} catch (err) {{
+        // Silent on failure, same spirit as pollMap() above -- the
+        // overlay just keeps showing whatever it last had.
+      }} finally {{
+        solarPollBusy = false;
+      }}
+    }}
+
+    solarMapToggle.addEventListener("change", () => {{
+      solarMapEnabled = solarMapToggle.checked;
+      if (solarMapEnabled) {{
+        pollSolarMap(); // immediate fetch, don't wait for the next interval tick
+      }} else {{
+        solarLegend.hidden = true;
+        redrawMap();
+      }}
+    }});
+    // The grid only changes on Pi #1's own 5-minute logging tick (and
+    // only while it's idle, see link/power_history.py's
+    // PowerHistoryLogger._log_once()) -- a slower poll than pollMap()'s
+    // 5s is plenty, and pollSolarMap() itself is a no-op whenever the
+    // checkbox is off, so this never fires an unnecessary request.
+    setInterval(pollSolarMap, 30000);
+
+    // ---- Waypoint-return / GPS-driving-route progress bar (2026-10-07) ----
+    // Reuses haversineMeters/nmeaToDecimal/decodeLatLonList above and is
+    // fed from pollMap()'s own GRT+STA fetches (no separate polling loop).
+    const returnProgress = document.getElementById("returnProgress");
+    const returnModeTitle = document.getElementById("returnModeTitle");
+    const returnStatLine = document.getElementById("returnStatLine");
+    const returnTrackFill = document.getElementById("returnTrackFill");
+    const returnPointsLayer = document.getElementById("returnPointsLayer");
+    const returnLegendSwatch = document.getElementById("returnLegendSwatch");
+    const returnLegendPointLabel = document.getElementById("returnLegendPointLabel");
+
+    const RETURN_MODE_TEXT = {{
+      RETURN: {{title: "Waypoint return (BTN_A)", legend: "Remaining waypoint", swatch: "blue"}},
+      DRIVE: {{title: "GPS driving route", legend: "Remaining route point", swatch: "red"}},
+    }};
+
+    // Below this speed the robot is effectively stopped -- showing an ETA
+    // would mean dividing by (near) zero, so an honest placeholder is
+    // shown instead (same convention as "GPS unavailable" / "No target
+    // (NAV)" elsewhere on this page).
+    const RETURN_MIN_MOVING_SPEED_KMH = 0.05;
+
+    function etaFor(distanceMeters, speedKmh) {{
+      if (!(speedKmh > RETURN_MIN_MOVING_SPEED_KMH)) return "ETA unavailable (stopped)";
+      const speedMs = (speedKmh * 1000) / 3600;
+      const totalSeconds = distanceMeters / speedMs;
+      if (totalSeconds < 60) return "~" + Math.round(totalSeconds) + " s";
+      const minutes = Math.floor(totalSeconds / 60);
+      const seconds = Math.round(totalSeconds % 60);
+      return "~" + minutes + " min" + (seconds > 0 ? " " + seconds + " s" : "");
+    }}
+
+    // remainingPoints: the tail of GRT's route (route[route_index:], see
+    // link/robot_state.py's get_route_progress()) -- points already
+    // behind the robot are NOT shown here (they still exist in GRT's
+    // full list so the map's own markers are unaffected, see pollMap()
+    // below). routeIndex is each remaining point's position in that FULL
+    // list, used only to label intermediate points the same way the map
+    // already does ("Waypoint 3" / "GPS Driving 5"), so the two views
+    // cross-reference. mode is GRT's trailing "RETURN"/"DRIVE" field.
+    function updateReturnProgress(remainingPoints, routeIndex, mode, robotLat, robotLon, speedKmh) {{
+      if (!remainingPoints.length || robotLat === null || robotLon === null) {{
+        returnProgress.hidden = true;
+        return;
+      }}
+
+      const modeText = RETURN_MODE_TEXT[mode] || RETURN_MODE_TEXT.DRIVE;
+      returnProgress.hidden = false;
+      returnProgress.classList.toggle("mode-route", mode !== "RETURN");
+      returnModeTitle.textContent = modeText.title;
+      returnLegendPointLabel.textContent = modeText.legend;
+      returnLegendSwatch.className = "swatch " + modeText.swatch;
+
+      // Cumulative REAL distance (haversine) from the robot's current
+      // position, through each remaining point in order -- deliberately
+      // not spaced evenly by count, which would misrepresent legs of very
+      // different lengths.
+      let prevLat = robotLat, prevLon = robotLon;
+      let cumulative = 0;
+      const withCumulative = remainingPoints.map((p, i) => {{
+        cumulative += haversineMeters(prevLat, prevLon, p.lat, p.lon);
+        prevLat = p.lat; prevLon = p.lon;
+        return {{lat: p.lat, lon: p.lon, cumulative, originalIndex: routeIndex + i}};
+      }});
+      const total = withCumulative[withCumulative.length - 1].cumulative;
+
+      returnPointsLayer.innerHTML = "";
+      withCumulative.forEach((p, i) => {{
+        const isTarget = i === withCumulative.length - 1;
+        const pct = total > 0 ? (p.cumulative / total) * 100 : 100;
+        // Intermediate points keep the map's own numbering (original
+        // route index + 1); the last point in the full route is always
+        // "Target", whichever mode this is.
+        const pointLabel = isTarget
+          ? "Target"
+          : (mode === "RETURN" ? "Waypoint " + (p.originalIndex + 1) : "GPS Driving " + (p.originalIndex + 1));
+
+        const dot = document.createElement("div");
+        dot.className = "return-point" + (isTarget ? " target" : "");
+        dot.style.left = pct + "%";
+        const remainingAfter = total - p.cumulative;
+        const line1 = pointLabel + " · " + p.cumulative.toFixed(0) + " m from here" +
+          (remainingAfter > 0.5 ? " · " + remainingAfter.toFixed(0) + " m to go after" : " · arrives at target");
+        const line2 = "ETA " + etaFor(p.cumulative, speedKmh) +
+          (speedKmh > RETURN_MIN_MOVING_SPEED_KMH ? " at " + speedKmh + " km/h" : "");
+        dot.setAttribute("data-tip", line1 + "\\n" + line2);
+        returnPointsLayer.appendChild(dot);
+
+        const label = document.createElement("div");
+        label.className = "return-point-label";
+        label.style.left = pct + "%";
+        label.innerHTML = '<span class="idx">' + pointLabel + "</span><br>" + p.cumulative.toFixed(0) + " m";
+        returnPointsLayer.appendChild(label);
+      }});
+
+      // The marker/fill always start at 0% -- see the .return-current
+      // CSS comment above: each poll is a fresh snapshot "from here", not
+      // an animation of the robot's actual movement.
+      returnTrackFill.style.width = "0%";
+
+      const remainingCount = withCumulative.length;
+      returnStatLine.innerHTML = total.toFixed(0) + ' m remaining <span class="muted">· ' +
+        remainingCount + " point" + (remainingCount === 1 ? "" : "s") + " left</span>";
+    }}
     // Fixed margin/usable area, in the same MAP_VIEW_SIZE x MAP_VIEW_SIZE
     // units as the <svg>'s own (unchanging) viewBox -- see
     // projectorsFromBounds() below for why zoom never touches the
@@ -1355,12 +1919,13 @@ def _control_page(role="admin"):
       positionMapTooltip(evt);
     }}
 
-    // Right-click delete (2026-10-05 explicit user request): only blue
-    // waypoints and violet photos/videos carry a `deleteAction` (see
-    // pollMap() below) -- there's no backing file/store to delete a red
-    // "NAV sent"/"GPS Driving" point or the robot's own position FROM, so
-    // those simply don't get a contextmenu handler at all (right-click on
-    // one falls through to the browser's normal context menu).
+    // Right-click delete (2026-10-05 explicit user request, extended
+    // 2026-10-06 to cover every marker colour): blue waypoints, red
+    // route/photos-videos... every marker except the robot's own live
+    // position now carries a `deleteAction` (see pollMap() below) --
+    // there's nothing meaningful to delete the robot's own position FROM,
+    // so that one alone still falls through to the browser's normal
+    // context menu.
     async function deleteWaypointPoint(index) {{
       const res = await sendToRobot(`WPD,${{index}}`);
       if (res.ok) pollMap();
@@ -1376,6 +1941,28 @@ def _control_page(role="admin"):
       const wireKind = kind === "video" ? "VID" : "SNAP";
       const res = await sendToRobot(`MDD,${{filename}},${{wireKind}}`);
       if (res.ok) pollMap();
+    }}
+
+    // Red "GPS Driving" points (2026-10-06): backed by the robot's own
+    // live route, same non-destructive "edits in-memory navigation state,
+    // nothing on disk" spirit as WPD above -- no confirmation needed, same
+    // as WPD, see pages/protocole_controle.html's RTD row.
+    async function deleteRoutePoint(index) {{
+      const res = await sendToRobot(`RTD,${{index}}`);
+      if (res.ok) pollMap();
+    }}
+
+    // Red "NAV sent" point (2026-10-06): unlike every other marker, this
+    // one has no backing store on the robot at all -- it's purely this
+    // browser tab's own memory of the last NAV it sent (see lastNavSent
+    // above), already gone the moment the page reloads. "Deleting" it is
+    // therefore just forgetting it locally and redrawing -- nothing to
+    // send the robot (a NAV target it already has stays active until a
+    // fresh NAV/RTE/STP replaces it, exactly as before this marker
+    // existed; this only stops the page from still showing an old one).
+    function deleteNavSentPoint() {{
+      lastNavSent = null;
+      pollMap();
     }}
 
     function addMapCircle(x, y, radius, data) {{
@@ -1398,6 +1985,10 @@ def _control_page(role="admin"):
             deleteWaypointPoint(data.deleteAction.index);
           }} else if (data.deleteAction.type === "media") {{
             deleteMediaPoint(data.deleteAction.filename, data.deleteAction.kind);
+          }} else if (data.deleteAction.type === "route") {{
+            deleteRoutePoint(data.deleteAction.index);
+          }} else if (data.deleteAction.type === "navSent") {{
+            deleteNavSentPoint();
           }}
         }});
       }}
@@ -1493,6 +2084,11 @@ def _control_page(role="admin"):
         addMapCircle(x, y, p.radius, p);
       }}
 
+      // Inserted last but pushed to the very back of the <svg> (see its
+      // own comment) -- so the overlay never hides a waypoint/route
+      // line or a marker, only the plain grid background beneath them.
+      drawSolarCells(project);
+
       drawMapScaleBar(invert);
     }}
 
@@ -1567,6 +2163,12 @@ def _control_page(role="admin"):
 
         const points = [];
         let robotFixOk = false;
+        let robotLatForProgress = null, robotLonForProgress = null;
+        // STA field order (see pollStatus() above/link/server.py): speed
+        // is fields[5] -- pollStatus()'s own parsed copy is out of scope
+        // here, hence this second, independent read from pollMap()'s own
+        // STA fetch for the progress bar's ETA.
+        let speedKmhForProgress = 0;
 
         if (staData.ok && staData.fields && staData.fields.length >= 4) {{
           const [lat, latDir, lon, lonDir] = staData.fields;
@@ -1576,6 +2178,11 @@ def _control_page(role="admin"):
             points.push({{lat: curLat, lon: curLon, color: MAP_COLORS.robot, radius: 6, label: "Robot"}});
             lastRobotLatLon = {{lat: curLat, lon: curLon}};
             robotFixOk = true;
+            robotLatForProgress = curLat;
+            robotLonForProgress = curLon;
+          }}
+          if (staData.fields.length >= 6) {{
+            speedKmhForProgress = parseFloat(staData.fields[5]) || 0;
           }}
         }}
         if (!robotFixOk) lastRobotLatLon = null;
@@ -1589,19 +2196,39 @@ def _control_page(role="admin"):
           }});
         }});
 
+        // GRT's two trailing fields (route_index, "RETURN"|"DRIVE" --
+        // 2026-10-07, see link/server.py's GRT handler) feed the progress
+        // bar below; decodeLatLonList() only reads the leading
+        // count+4*count fields so it still returns the FULL route
+        // unaffected (the map's own markers below are unchanged).
+        let grtRouteIndex = 0;
+        let grtMode = "DRIVE";
+        let grtFullRoute = [];
         if (grtData.ok) {{
-          decodeLatLonList(grtData.fields).forEach((p, i) => {{
+          grtFullRoute = decodeLatLonList(grtData.fields);
+          const trailingStart = 1 + grtFullRoute.length * 4;
+          if (grtData.fields.length >= trailingStart + 2) {{
+            grtRouteIndex = parseInt(grtData.fields[trailingStart], 10) || 0;
+            grtMode = grtData.fields[trailingStart + 1] === "RETURN" ? "RETURN" : "DRIVE";
+          }}
+          grtFullRoute.forEach((p, i) => {{
             points.push({{
               lat: p.lat, lon: p.lon, color: MAP_COLORS.route, radius: 4,
               label: `GPS Driving ${{i + 1}}`, noTimestamp: true,
+              deleteAction: {{type: "route", index: i}},
             }});
           }});
         }}
+        updateReturnProgress(
+          grtFullRoute.slice(grtRouteIndex), grtRouteIndex, grtMode,
+          robotLatForProgress, robotLonForProgress, speedKmhForProgress
+        );
 
         if (lastNavSent) {{
           points.push({{
             lat: lastNavSent.lat, lon: lastNavSent.lon, color: MAP_COLORS.route, radius: 5,
             label: "NAV sent", ts: lastNavSent.sentAt,
+            deleteAction: {{type: "navSent"}},
           }});
         }}
 
@@ -1687,6 +2314,84 @@ def _control_page(role="admin"):
       const degStr = String(degrees).padStart(degDigits, "0");
       const minStr = minutes.toFixed(3).padStart(6, "0");
       return [degStr + minStr, direction];
+    }}
+
+    // Catches the single most common manual-console mistake (2026-10-07):
+    // typing a NAV/RTE point in plain decimal degrees -- e.g. copy-pasted
+    // straight from this very page's own "current"/"target" status display
+    // a few lines below (which IS decimal degrees), or from a map -- where
+    // this protocol's ddmm.mmmm wire format is actually expected (see the
+    // "NAV,4723.492,N,..." button label above). Before this existed, that
+    // silently sent the wrong point: nmeaToDecimal() can't tell "a valid-
+    // looking but wrong value" from a genuine one, so e.g. "47.391534,N"
+    // typed in place of "4723.492,N" for the SAME intended latitude got
+    // sent as-is and decoded by the robot as roughly 0.79 degrees North --
+    // ~45x off -- with no error anywhere, only a suspiciously-wrong
+    // "target" reading afterward to notice by.
+    //
+    // Deliberately NOT a "this must be somewhere near France" geography
+    // check -- the button above's own example and this protocol's docs use
+    // points from all over (see protocole_controle.html), and a geography
+    // box would wrongly "fix" a genuine faraway point. Instead this uses a
+    // fact that's true everywhere: a GENUINE ddmm.mmmm latitude's raw
+    // numeric value is at least "degree * 100", so for any site more than
+    // roughly half a degree from the equator the raw value is comfortably
+    // >= 50 -- a raw magnitude below RAW_LAT_MAGNITUDE_FLOOR can only be a
+    // plain decimal-degrees latitude (whose maximum possible magnitude is
+    // 90). Longitude can't carry this same check on its own (near the
+    // Greenwich meridian this protocol's own ddmm.mmmm longitude is
+    // numerically small too, indistinguishable from decimal degrees by
+    // magnitude alone), so the decision for a whole point is made from
+    // latitude only and applied to both of its fields together. Mirrored
+    // server-side in link/robot_state.py's own _point_is_plausible() (same
+    // threshold, same reasoning) as a safety net for anything that skips
+    // this website and talks to the robot's TCP port directly.
+    const RAW_LAT_MAGNITUDE_FLOOR = 90.0;
+
+    function normalizeGpsPoint(latRaw, latDir, lonRaw, lonDir) {{
+      const latMagnitude = Math.abs(parseFloat(latRaw));
+      if (!Number.isFinite(latMagnitude) || latMagnitude >= RAW_LAT_MAGNITUDE_FLOOR) {{
+        return [latRaw, lonRaw];  // already looks like genuine ddmm.mmmm -- leave both as typed
+      }}
+      const lat = (latDir === "S") ? -latMagnitude : latMagnitude;
+      const lonMagnitude = Math.abs(parseFloat(lonRaw));
+      const lon = (lonDir === "W") ? -lonMagnitude : lonMagnitude;
+      const [latStr] = decimalToNmea(lat, false);
+      const [lonStr] = decimalToNmea(lon, true);
+      return [latStr, lonStr];
+    }}
+
+    // Rewrites a console-typed NAV/RTE command in place, auto-converting
+    // any point that looks like plain decimal degrees (see
+    // normalizeGpsPoint() above) before it's ever sent to the robot.
+    // Anything else (STP, DRV, CAM, PID, STA...) is returned unchanged.
+    // Called from sendToRobot() below, so this covers every command this
+    // console actually sends -- manually typed, or built by a button.
+    function normalizeGpsCommand(command) {{
+      const parts = command.split(",").map((p) => p.trim());
+      const type = parts[0];
+
+      if (type === "NAV" && parts.length === 5) {{
+        const [latStr, lonStr] = normalizeGpsPoint(parts[1], parts[2].toUpperCase(), parts[3], parts[4].toUpperCase());
+        return ["NAV", latStr, parts[2].toUpperCase(), lonStr, parts[4].toUpperCase()].join(",");
+      }}
+
+      if (type === "RTE" && parts.length > 1) {{
+        const count = parseInt(parts[1], 10);
+        if (Number.isFinite(count) && parts.length === 2 + count * 4) {{
+          const out = ["RTE", parts[1]];
+          for (let i = 0; i < count; i++) {{
+            const base = 2 + i * 4;
+            const latDir = parts[base + 1].toUpperCase();
+            const lonDir = parts[base + 3].toUpperCase();
+            const [latStr, lonStr] = normalizeGpsPoint(parts[base], latDir, parts[base + 2], lonDir);
+            out.push(latStr, latDir, lonStr, lonDir);
+          }}
+          return out.join(",");
+        }}
+      }}
+
+      return command;
     }}
 
     // Parses a GPS route file: one point per line as "lat,lon" in decimal
@@ -2028,6 +2733,17 @@ def _media_page(videos=None, images=None, role="admin"):
       padding: 12px;
       line-height: 1.6;
     }}
+    /* Bugfix (2026-10-06): the rule above sets its own `display: flex`,
+       which beats the browser's built-in "[hidden] {{ display: none }}"
+       default on specificity (two classes vs. one attribute) -- so toggling
+       a placeholder's `.hidden` property from JS (see robotMediaPlaceholder
+       below) silently did nothing, leaving it visible side-by-side with
+       whatever was supposed to replace it (e.g. the Robot camera carousel's
+       actual image), squeezing that element off-centre instead of letting
+       it fill/centre in the box alone. Same fix as .camera-stream[hidden]
+       right below already uses for the live feed image -- every other
+       `.placeholder` toggled via JS needs this same explicit override. */
+    .panel .placeholder[hidden] {{ display: none; }}
 
     /* Video panel: one video at a time, auto-advances through the whole
        set on a loop (see script below). Muted by default, native controls
@@ -2389,16 +3105,35 @@ def api_power_history():
     return jsonify({"ok": True, "period": period, "rows": rows})
 
 
+@app.route("/api/solar_map")
+@login_required
+def api_solar_map():
+    """Read-only, like /api/power_history above -- no role check needed,
+    a viewer can see the solar-exposure overlay same as the live gauges.
+    fetch_solar_map() loops over Pi #1's paginated SMP response (see
+    power_history_client.py and link/power_history.py/link/solar_map.py)
+    and returns the assembled grid cells as JSON for /control's map
+    checkbox (2026-10-07, explicit user request) to draw."""
+    try:
+        cells = fetch_solar_map(ROBOT_HOST, ROBOT_PORT)
+    except PowerHistoryError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 502
+    return jsonify({"ok": True, "cells": cells})
+
+
 @app.route("/media/camera")
 @login_required
 def media_camera():
     """Proxies the robot's live MJPEG camera stream (Pi #1,
     camera/stream_server.py in the robot repo) so the browser only ever
     talks to this server -- the feed stays behind the login instead of
-    being reachable directly on the LAN. Returns 502 quickly (instead of
-    hanging) if the robot's camera script isn't running or unreachable, so
-    the /control page's <img> "error" handler fires and falls back to the
-    recorded video playlist."""
+    being reachable directly on the LAN. Shared by two different <img>
+    error handlers: /control's own live-camera column (2026-10-06, just
+    a "Camera unavailable" placeholder and a retry) and /media's "Video
+    feed" panel (falls back to the recorded video playlist instead).
+    Returns 502 quickly (instead of hanging) if the robot's camera script
+    isn't running or unreachable, so whichever page is asking gets its
+    fallback right away rather than a long hang."""
     stream_url = f"http://{ROBOT_HOST}:{CAMERA_PORT}{CAMERA_STREAM_PATH}"
     try:
         upstream = requests.get(stream_url, stream=True, timeout=CAMERA_TIMEOUT)
