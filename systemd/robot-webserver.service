@@ -1,0 +1,46 @@
+[Unit]
+# Starts the Flask web server (app.py) automatically at boot -- see
+# README.md's "Lancer le serveur au demarrage de la Pi" section for the
+# full install/troubleshooting guide. Same systemd approach as Pi #1's
+# own robot.service (robot repo, systemd/robot.service), adapted to this
+# Pi: app.py is a single process (unlike Pi #1's link+camera pair), so
+# there's no start_robot.sh-style wrapper script here -- ExecStart below
+# calls the venv's own python3 binary directly, which uses that venv's
+# installed packages without needing to `source venv/bin/activate` first
+# (that activation script only matters for an interactive shell's PATH;
+# a program pointed straight at the venv's python3 gets the same effect).
+Description=Robot web server (Flask, app.py) - Pi #2
+# Not a hard requirement for Flask itself to start listening, but this
+# site is useless without the WiFi link to Pi #1 (every command relay
+# and the GPS map/media polling go over the network), so there's no
+# point starting before the network is actually up.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Runs as the same user the project is normally launched by hand as (NOT
+# root), same "robot" account/convention as Pi #1's own robot.service --
+# adapt User=/Group= below if this Pi uses a different account.
+User=robot
+Group=robot
+WorkingDirectory=/home/robot/robot-webserver
+# app.py's own load_dotenv() call reads .env from the current working
+# directory -- WorkingDirectory above must stay in sync with wherever
+# this project actually lives on this Pi, or .env (login credentials,
+# ROBOT_HOST, FLASK_SECRET_KEY...) silently fails to load.
+ExecStart=/home/robot/robot-webserver/venv/bin/python3 /home/robot/robot-webserver/app.py
+
+# If app.py ever exits on its own (a crash, an unhandled exception) --
+# not a deliberate `systemctl stop` -- restart it automatically after a
+# short delay rather than leaving the site unreachable until someone
+# notices and SSHes in.
+Restart=on-failure
+RestartSec=5
+
+# journalctl -u robot-webserver.service -f to watch these live.
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

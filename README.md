@@ -416,6 +416,55 @@ Sa navigation (2026-10-05) ne contient plus que "Control page" et
 ces deux pages restent accessibles, mais uniquement via le sommaire
 `/pages`, comme le reste des pages de référence.
 
+### Heure de bord + alignement des deux colonnes (2026-10-10)
+
+Demande explicite de l'utilisateur. Deux changements sur `pages/power.html` :
+
+- Une petite case **"Onboard time (Pi #1)"**, de faible hauteur (une seule
+  ligne), ajoutée juste au-dessus du panneau Battery (colonne de droite).
+  Elle affiche l'horloge système du Pi #1 — nouveau 15ᵉ champ `onboard_time`
+  de la trame `PWR` (voir le dépôt `robot`, section "Heure de bord" de son
+  README) — ainsi qu'un petit texte d'écart ("Ns ahead of"/"behind this
+  device") par rapport à l'horloge du navigateur, pour repérer en un coup
+  d'œil une dérive de l'horloge du Pi (pas de pile RTC, NTP injoignable...).
+  Cet écart est purement indicatif : l'horloge du navigateur elle-même
+  n'est pas garantie exacte, ce n'est qu'une comparaison relative rapide.
+- Les deux colonnes du tableau de bord sont maintenant **alignées en bas** :
+  "Load output" (dernière section de la colonne de gauche) et
+  "Temperatures" (dernière section de la colonne de droite) se terminent
+  désormais exactement au même niveau, quelle que soit la colonne la plus
+  haute. Réalisé en CSS pur (`.dashboard { align-items: stretch }` + un
+  `.col-spacer` flexible inséré juste avant la dernière section de chaque
+  colonne, qui absorbe l'espace vertical excédentaire de la colonne la plus
+  courte) — aucune hauteur n'est codée en dur, donc la mise en page reste
+  correcte si le contenu d'une section change. Vérifié par une capture
+  Playwright confirmant un écart de 0px entre les bas des deux sections.
+
+### Lifetime (durée d'éveil) + bascule sur l'heure GPS (2026-10-10)
+
+Demande explicite de l'utilisateur : *"ajoutes le life time qui
+chronomètre la durée d'éveil de la pi (en petit a côté de l'heure de
+bord). si le onboard time n'est pas réglé par le Wifi, prends celui du
+GPS"*. Deux nouveaux champs en fin de trame `PWR` (16ᵉ `onboard_time_source`,
+17ᵉ `uptime_s`, voir le dépôt `robot`, section "Heure de bord" de son
+README, et `pages/protocole_controle.html`) :
+
+- Un petit texte **"up Xh.."/"up Xd Xh"/"up X min"** apparaît maintenant
+  directement à côté de l'heure de bord, dans la même case que
+  "Onboard time (Pi #1)" — c'est le temps écoulé depuis le dernier
+  démarrage du Pi #1 (`uptime_s`, lu depuis `/proc/uptime` côté robot,
+  donc totalement indépendant du problème d'horloge ci-dessous : c'est le
+  compteur de démarrage du noyau Linux, pas l'heure système).
+- Quand l'horloge système du Pi #1 n'a pas encore été corrigée par le
+  WiFi/NTP (pas de pile RTC — voir plus haut), `onboard_time` bascule
+  automatiquement sur l'heure UTC du récepteur GPS dès qu'un premier fix
+  est arrivé (correcte dès l'acquisition du fix, indépendamment du
+  WiFi/NTP) — voir `link/power_history.py` et `link/gps_reader.py` côté
+  robot. Dans ce cas (rare, normalement limité aux premières minutes
+  après un démarrage), une petite étiquette **"GPS"** apparaît à côté de
+  l'heure de bord pour signaler que la valeur affichée ne vient pas de
+  l'horloge système ; le cas normal (`SYS`) n'affiche rien de plus.
+
 ## Caméra en direct (panneau "Video feed" de /media)
 
 Si une webcam est branchée sur le robot (Raspberry Pi n°1) et que son

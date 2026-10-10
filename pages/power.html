@@ -77,6 +77,23 @@
      not a doc to list there (this part stands, unrelated to the
      History placement back-and-forth above).
 
+     2026-10-10: "lifetime" readout -- a small uptime counter next to the
+     onboard-clock box, showing how long Pi #1 has been awake since its
+     last boot (explicit user request: "ajoutes le life time qui
+     chronomètre la durée d'éveil de la pi (en petit a côté de l'heure de
+     bord)"). Backed by a new uptime_s field (17th, link/uptime.py reads
+     /proc/uptime -- immune to the clock-plausibility problem below since
+     it's the kernel's own monotonic boot counter, not wall-clock time).
+     Same request also added an onboard_time_source field (16th, "SYS" or
+     "GPS"): this Pi has no RTC battery, so right after boot -- before
+     NTP has corrected the clock -- onboard_time itself can't be trusted;
+     link/server.py falls back to the GPS receiver's own UTC time in that
+     case (correct the moment a fix is acquired, independent of WiFi/NTP
+     entirely) and labels it so. A small "GPS" badge appears next to the
+     clock only in that (hopefully rare, boot-time-only) case -- the
+     normal "SYS" case shows nothing extra, same spirit as the drift
+     readout already being silent when the two clocks agree.
+
      Served by app.py's @app.route("/power") (static send_from_directory,
      like the other pages/*.html files), behind the same @login_required
      guard as /control. PWR is in VIEWER_ALLOWED_COMMANDS alongside STA, so
@@ -85,9 +102,12 @@
      /api/send CONTRACT (confirmed from the real app.py/robot_link.py):
        POST /api/send  body: {"command": "PWR"}  -- bare sentence type, no
          "$PROV," prefix/checksum (robot_link.build_sentence adds both).
-       Success: {"ok": true, "fields": [...14 strings...], "raw_response": "..."}
+       Success: {"ok": true, "fields": [...17 strings...], "raw_response": "..."}
          fields[0..12] = FIELD_ORDER below (cpu_temp is the 13th, index 12),
-         fields[13] = "1"/"0" available flag (Tracer only, see above).
+         fields[13] = "1"/"0" available flag (Tracer only, see above),
+         fields[14] = onboard_time (Unix ts, 2026-10-10),
+         fields[15] = onboard_time_source ("SYS"|"GPS", 2026-10-10),
+         fields[16] = uptime_s (2026-10-10, see the "lifetime" note above).
        Failure: {"ok": false, "error": "..."} -- robot unreachable or
          answered ERR (e.g. link/server.py not yet updated to know PWR). -->
 <!DOCTYPE html>
@@ -164,9 +184,24 @@
     display: grid;
     grid-template-columns: 1fr 1fr;
     gap: 10px;
-    align-items: start;
+    /* 2026-10-10: stretch (the grid default, written out here because the
+       previous rule pinned it to "start") -- explicit user request: the
+       two columns' LAST sections ("Load output" on the left, "Temperatures"
+       on the right) must end at the same height, whichever column is
+       naturally taller. Stretch makes both .col grid items as tall as the
+       row (= the taller column's own content height); .col-spacer below is
+       what actually pushes each column's last section down to use that
+       extra height, rather than leaving it as dead space at the bottom. */
+    align-items: stretch;
   }
   .col { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+  /* See the .dashboard comment above: a flex child with no explicit size
+     that absorbs whatever extra height .col was stretched to, so the
+     section right after it lands flush with the bottom of the taller
+     column. Collapses to 0 height on its own (nothing to absorb) once the
+     columns stack into one at the 860px breakpoint below, since neither
+     .col is stretched beyond its own content there. */
+  .col-spacer { flex: 1 1 auto; min-height: 0; }
   @media (max-width: 860px) {
     .dashboard { grid-template-columns: 1fr; }
   }
@@ -210,6 +245,30 @@
   .vgauge-tile .value { font-size: 14px; font-weight: 600; font-variant-numeric: tabular-nums; transition: color 0.3s ease; }
   .vlcd-track { display: flex; flex-direction: column-reverse; gap: 2px; width: 24px; height: 100px; }
   .vlcd-seg { flex: 1; min-height: 2px; border-radius: 2px; background: var(--border); transition: background-color 0.2s ease; }
+
+  /* --- onboard clock (2026-10-10): Pi #1's own system time, in a short
+     box above Battery -- explicit user request so a drifted/wrong Pi #1
+     clock is visible at a glance next to the operator's own watch. Kept
+     deliberately low-height (one text row), unlike every other card on
+     this page. --- */
+  .clock-card {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+    padding: 8px 12px; display: flex; align-items: baseline; justify-content: space-between; gap: 8px;
+  }
+  .clock-card .clock-main { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+  .clock-card .clock-value { font-size: 18px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  /* "Lifetime" readout (2026-10-10, explicit user request): Pi #1's own
+     uptime, deliberately small/muted right next to the clock value --
+     never the focal point of this card, just a glance-able extra. */
+  .clock-card .clock-uptime { font-size: 11px; color: var(--text-secondary); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .clock-card .clock-drift { font-size: 11px; color: var(--text-secondary); text-align: right; }
+  /* GPS-fallback badge (2026-10-10): only shown while onboard_time_source
+     is "GPS" -- see the file header note. Hidden (display:none) the rest
+     of the time, i.e. almost always. */
+  .clock-card .clock-source {
+    font-size: 9.5px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.04em;
+    border: 1px solid var(--border); border-radius: 4px; padding: 1px 4px; white-space: nowrap;
+  }
 
   /* --- net power balance dial (diverging, 0 W at the apex) --- */
   .balance-card {
@@ -298,6 +357,10 @@
         <div class="tile-grid" id="pvGrid"></div>
       </div>
 
+      <!-- Pushes "Load output" (this column's last section) flush with
+           the bottom of the taller column -- see the .col-spacer CSS
+           comment above. -->
+      <div class="col-spacer"></div>
       <div class="area-load">
         <div class="section-title">Load output</div>
         <div class="tile-grid" id="loadGrid"></div>
@@ -305,12 +368,28 @@
     </div>
 
     <div class="col">
+      <div class="area-clock">
+        <div class="section-title">Onboard time (Pi #1)</div>
+        <div class="clock-card">
+          <div class="clock-main">
+            <span class="clock-value" id="onboardClockValue">—</span>
+            <span class="clock-uptime" id="onboardUptime"></span>
+            <span class="clock-source" id="onboardClockSource" style="display: none;">GPS</span>
+          </div>
+          <span class="clock-drift" id="onboardClockDrift"></span>
+        </div>
+      </div>
+
       <div class="area-battery">
         <div class="section-title">Battery</div>
         <div class="tile-grid" id="batteryGrid"></div>
         <div class="tile-grid" id="batterySocGrid" style="margin-top: 2px;"></div>
       </div>
 
+      <!-- Pushes "Temperatures" (this column's last section) flush with
+           the bottom of the taller column -- see the .col-spacer CSS
+           comment above. -->
+      <div class="col-spacer"></div>
       <div class="area-temps">
         <div class="section-title">Temperatures</div>
         <div class="tile-grid" id="tempsGrid" style="grid-template-columns: repeat(3, 1fr);"></div>
@@ -833,14 +912,77 @@
       if (!data.ok) {
         throw new Error(data.error || "robot returned an error");
       }
-      if (!data.fields || data.fields.length < FIELD_ORDER.length + 1) {
+      // +4, not +1: the trailing available flag, onboard_time,
+      // onboard_time_source, and uptime_s fields right after it
+      // (2026-10-10, extend-only -- see link/server.py's PWR handler and
+      // pages/protocole_controle.html).
+      if (!data.fields || data.fields.length < FIELD_ORDER.length + 4) {
         throw new Error("unexpected PWR response: " + (data.raw_response || ""));
       }
 
       const values = {};
       FIELD_ORDER.forEach((name, i) => { values[name] = parseFloat(data.fields[i]); });
       values.available = data.fields[FIELD_ORDER.length] === "1";
+      values.onboard_time = parseFloat(data.fields[FIELD_ORDER.length + 1]);
+      values.onboard_time_source = data.fields[FIELD_ORDER.length + 2];
+      values.uptime_s = parseFloat(data.fields[FIELD_ORDER.length + 3]);
       return values;
+    }
+
+    // Pi #1's own system clock has nothing to do with the Tracer (same
+    // reasoning as cpu_temp above), so this is never gated by `stale`.
+    // The drift readout is only ever relative to THIS device's own clock
+    // (which could itself be wrong) -- it's a quick "do these roughly
+    // agree" glance, not an authoritative claim about which one is right.
+    function pushOnboardClock(onboardTs, source) {
+      const valueEl = document.getElementById("onboardClockValue");
+      const driftEl = document.getElementById("onboardClockDrift");
+      const sourceEl = document.getElementById("onboardClockSource");
+      if (!Number.isFinite(onboardTs)) {
+        valueEl.textContent = "—";
+        driftEl.textContent = "";
+        sourceEl.style.display = "none";
+        return;
+      }
+      valueEl.textContent = new Date(onboardTs * 1000).toLocaleTimeString();
+      const driftS = Math.round(onboardTs - Date.now() / 1000);
+      if (Math.abs(driftS) < 2) {
+        driftEl.textContent = "in sync with this device";
+      } else {
+        driftEl.textContent = Math.abs(driftS) + "s " + (driftS > 0 ? "ahead of" : "behind") + " this device";
+      }
+      // GPS fallback (2026-10-10, see the file header note): only shown
+      // while onboard_time_source is "GPS" -- the normal "SYS" case shows
+      // no badge at all, so this stays invisible almost all the time.
+      if (source === "GPS") {
+        sourceEl.style.display = "inline";
+      } else {
+        sourceEl.style.display = "none";
+      }
+    }
+
+    // "Lifetime" readout (2026-10-10, explicit user request): how long
+    // Pi #1 has been awake since its last boot, kept deliberately
+    // compact -- days+hours once it's been up a while, otherwise
+    // hours+minutes or just minutes, same spirit as fmtDuration() above
+    // (that one works in minutes for the battery countdown; this one
+    // takes uptime_s directly and additionally rolls over into days,
+    // since this robot can plausibly stay awake for several days).
+    function fmtUptime(seconds) {
+      if (!Number.isFinite(seconds) || seconds < 0) return null;
+      const totalMin = Math.floor(seconds / 60);
+      const days = Math.floor(totalMin / 1440);
+      const hours = Math.floor((totalMin % 1440) / 60);
+      const mins = totalMin % 60;
+      if (days > 0) return days + "d " + hours + "h";
+      if (hours > 0) return hours + "h" + String(mins).padStart(2, "0");
+      return mins + " min";
+    }
+
+    function pushUptime(uptimeS) {
+      const el = document.getElementById("onboardUptime");
+      const formatted = fmtUptime(uptimeS);
+      el.textContent = formatted ? "up " + formatted : "";
     }
 
     async function pollOnce() {
@@ -853,6 +995,8 @@
           stale ? NaN : v.pv_power - v.load_power,
           stale ? null : { voltage: v.battery_voltage, soc: v.battery_soc }
         );
+        pushOnboardClock(v.onboard_time, v.onboard_time_source);
+        pushUptime(v.uptime_s);
         pvVoltage.push(v.pv_voltage, stale);
         pvCurrent.push(v.pv_current, stale);
         pvPower.push(v.pv_power, stale);
