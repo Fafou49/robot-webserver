@@ -138,7 +138,10 @@
     background: var(--bg);
     color: var(--text-primary);
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
-    padding: 12px 14px;
+    padding-top: calc(12px + var(--shutdown-banner-h, 0px));
+    padding-right: 14px;
+    padding-bottom: 12px;
+    padding-left: 14px;
     display: flex;
     flex-direction: column;
   }
@@ -369,7 +372,7 @@
 
     <div class="col">
       <div class="area-clock">
-        <div class="section-title">Onboard time (Pi #1)</div>
+        <div class="section-title">Onboard time (Computer 1)</div>
         <div class="clock-card">
           <div class="clock-main">
             <span class="clock-value" id="onboardClockValue">—</span>
@@ -406,6 +409,13 @@
   </div>
 
   <div class="footer-note" id="lastUpdateNote">Waiting for the first reading…</div>
+
+  <!-- Site-wide shutdown alert banner (2026-10-12) -- see
+       static/shutdown_banner.js for why this is one shared module
+       rather than page-specific markup. Mounted below, fed from this
+       page's own existing PWR poll (fetchPowerSnapshot()) rather than
+       running its own separate poll loop like /control and /media do. -->
+  <script src="/static/shutdown_banner.js"></script>
 
   <script>
     const POLL_INTERVAL_MS = 3000;
@@ -844,7 +854,7 @@
     });
     // Thresholds proposed, not yet field-validated -- see the file header note.
     const cpuTemp = makeGaugeTileVertical(tempsGrid, {
-      label: "CPU (Pi #1)", unit: "°C", decimals: 1, lo: 20, hi: 100,
+      label: "CPU (Computer 1)", unit: "°C", decimals: 1, lo: 20, hi: 100,
       breaks: [60, 70, 80], direction: "rising",
     });
 
@@ -918,6 +928,19 @@
       // pages/protocole_controle.html).
       if (!data.fields || data.fields.length < FIELD_ORDER.length + 4) {
         throw new Error("unexpected PWR response: " + (data.raw_response || ""));
+      }
+
+      // Shutdown banner (2026-10-12, extend-only, see
+      // static/shutdown_banner.js): fed straight from the raw
+      // `data.fields` array here rather than threading a parsed value
+      // through the `values` object below, same wire index
+      // (SHUTDOWN_ETA_FIELD_INDEX = 17) that module already knows
+      // about. Tolerates an older Pi #1 that doesn't send this field
+      // yet (updateFromPwrFields() itself falls back to "nothing
+      // scheduled" when the array is too short), so this is
+      // deliberately NOT part of the length check above.
+      if (window.ShutdownBanner) {
+        window.ShutdownBanner.updateFromPwrFields(data.fields);
       }
 
       const values = {};
@@ -1023,6 +1046,9 @@
       }
     }
 
+    if (window.ShutdownBanner) {
+      window.ShutdownBanner.mount();
+    }
     pollOnce();
     setInterval(pollOnce, POLL_INTERVAL_MS);
   </script>

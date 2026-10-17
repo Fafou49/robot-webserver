@@ -28,6 +28,7 @@ from flask import Flask, Response, abort, jsonify, redirect, request, send_from_
 from werkzeug.security import check_password_hash
 
 from power_history_client import PowerHistoryError, fetch_power_history, fetch_solar_map
+from robot_host import RobotHostResolver
 from robot_link import send_command
 
 load_dotenv()
@@ -51,15 +52,29 @@ IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".gif", ".webp")
 # not a permanent archive.
 MEDIA_THUMB_CACHE_DIR = os.path.join(MEDIA_DIR, "tmp_media_cache")
 
-# Where the robot's control server (Pi #1, link/server.py) listens.
+# Where the robot's control server (Pi #1, link/server.py) and its live
+# camera stream (Pi #1, camera/stream_server.py) listen. Pi #1 can be
+# reached at more than one address depending on which network it's
+# currently on (its Bbox/home fixed IP, or a temporary mobile-hotspot IP
+# while testing elsewhere) -- ROBOT_HOST_CANDIDATES lists all of them,
+# comma-separated, and the two resolvers below (one per port, see
+# robot_host.py for why they must stay separate) each remember which
+# candidate currently answers for THEIR service, trying the others only
+# when the current one stops working. Falls back to the single-value
+# ROBOT_HOST (pre-2026-10-17 behavior) if ROBOT_HOST_CANDIDATES isn't set.
 ROBOT_HOST = os.environ.get("ROBOT_HOST", "192.168.1.180")
+ROBOT_HOST_CANDIDATES = [
+    h for h in os.environ.get("ROBOT_HOST_CANDIDATES", ROBOT_HOST).split(",")
+]
 ROBOT_PORT = int(os.environ.get("ROBOT_PORT", "5050"))
+ROBOT_CONTROL_RESOLVER = RobotHostResolver(ROBOT_HOST_CANDIDATES)
 
-# Where the robot's live camera stream (Pi #1, camera/stream_server.py)
-# listens. Same host as ROBOT_HOST -- only the port and path differ.
+# Live camera stream -- same candidate addresses as above, different port
+# and its own independent resolver (camera script down != wrong network).
 CAMERA_PORT = int(os.environ.get("CAMERA_PORT", "8000"))
 CAMERA_STREAM_PATH = os.environ.get("CAMERA_STREAM_PATH", "/stream.mjpg")
 CAMERA_TIMEOUT = 3  # seconds -- how long to wait before giving up on the robot's camera
+ROBOT_CAMERA_RESOLVER = RobotHostResolver(ROBOT_HOST_CANDIDATES)
 
 # Credentials expected in .env (see .env.example): WEBSERVER_USERNAME and
 # WEBSERVER_PASSWORD_HASH (hash generated with generate_password.py, never
@@ -116,6 +131,80 @@ def _list_media(directory, extensions):
     if not os.path.isdir(directory):
         return []
     return sorted(f for f in os.listdir(directory) if f.lower().endswith(extensions))
+
+
+def _send_command_with_fallback(command, timeout=2.0):
+    """Like robot_link.send_command(), but tries ROBOT_CONTROL_RESOLVER's
+    candidate hosts in turn until one actually answers (see robot_host.py).
+    Only a connection-level failure (host down/unreachable/wrong network)
+    triggers a rotation to the next candidate -- a reachable Pi #1
+    answering with an ERR sentence, or a malformed response, means the
+    host itself is fine, so that's returned as-is without trying others
+    (trying a *different* address wouldn't explain away a real ERR)."""
+    result = None
+    for host in ROBOT_CONTROL_RESOLVER.ordered():
+        result = send_command(command, host, ROBOT_PORT, timeout=timeout)
+        if result.get("error", "").startswith("CONNECTION_ERROR"):
+            ROBOT_CONTROL_RESOLVER.report_failure(host)
+            continue
+        ROBOT_CONTROL_RESOLVER.report_success(host)
+        return result
+    return result  # every candidate failed -- return the last attempt as-is
+
+
+def _fetch_power_history_with_fallback(period):
+    """Same fallback idea as _send_command_with_fallback(), for the
+    paginated HIS fetch (power_history_client.fetch_power_history), which
+    raises PowerHistoryError (rather than returning an error dict) on any
+    failure -- connection-level or otherwise. Re-raises the last error if
+    every candidate fails."""
+    last_exc = None
+    for host in ROBOT_CONTROL_RESOLVER.ordered():
+        try:
+            rows = fetch_power_history(period, host, ROBOT_PORT)
+        except PowerHistoryError as exc:
+            ROBOT_CONTROL_RESOLVER.report_failure(host)
+            last_exc = exc
+            continue
+        ROBOT_CONTROL_RESOLVER.report_success(host)
+        return rows
+    raise last_exc
+
+
+def _fetch_solar_map_with_fallback():
+    """Same idea as _fetch_power_history_with_fallback(), for the SMP
+    (solar map) fetch."""
+    last_exc = None
+    for host in ROBOT_CONTROL_RESOLVER.ordered():
+        try:
+            cells = fetch_solar_map(host, ROBOT_PORT)
+        except PowerHistoryError as exc:
+            ROBOT_CONTROL_RESOLVER.report_failure(host)
+            last_exc = exc
+            continue
+        ROBOT_CONTROL_RESOLVER.report_success(host)
+        return cells
+    raise last_exc
+
+
+def _camera_get_with_fallback(path, **kwargs):
+    """Same fallback idea as _send_command_with_fallback(), for a plain
+    HTTP GET against Pi #1's camera script (requests.get), used by every
+    /media/* route below that talks to it. Re-raises the last
+    requests.exceptions.RequestException if every candidate fails, same
+    as a plain requests.get() would raise on its own."""
+    last_exc = None
+    for host in ROBOT_CAMERA_RESOLVER.ordered():
+        url = f"http://{host}:{CAMERA_PORT}{path}"
+        try:
+            resp = requests.get(url, **kwargs)
+        except requests.exceptions.RequestException as exc:
+            ROBOT_CAMERA_RESOLVER.report_failure(host)
+            last_exc = exc
+            continue
+        ROBOT_CAMERA_RESOLVER.report_success(host)
+        return resp
+    raise last_exc
 
 
 def _clear_media_thumb_cache():
@@ -388,7 +477,7 @@ def _control_page(role="admin"):
     /* Top-left: quick links to the rest of the site. */
     .nav {{
       position: fixed;
-      top: 16px;
+      top: calc(16px + var(--shutdown-banner-h, 0px));
       left: 20px;
       display: flex;
       gap: 14px;
@@ -411,7 +500,7 @@ def _control_page(role="admin"):
     /* Clock, fixed top-right corner, always visible. */
     .clock {{
       position: fixed;
-      top: 16px;
+      top: calc(16px + var(--shutdown-banner-h, 0px));
       right: 20px;
       font-family: "Courier New", monospace;
       font-size: 14px;
@@ -430,7 +519,7 @@ def _control_page(role="admin"):
        every few seconds (see script below). */
     .status-bar {{
       flex: 0 0 auto;
-      margin-top: 56px;
+      margin-top: calc(56px + var(--shutdown-banner-h, 0px));
       padding: 10px 24px;
       border-bottom: 1px solid #30363d;
       display: flex;
@@ -1190,6 +1279,12 @@ def _control_page(role="admin"):
     <div class="console-input">{console_input_html}</div>
   </div>
 
+  <!-- Site-wide shutdown alert banner (2026-10-12) -- see
+       static/shutdown_banner.js. This page has no PWR poll of its own
+       (unlike pages/power.html), so mountAndPoll() below runs its own
+       independent, lightweight poll loop just for this one field. -->
+  <script src="/static/shutdown_banner.js"></script>
+
   <script>
     function pad(n) {{ return String(n).padStart(2, "0"); }}
 
@@ -1200,6 +1295,10 @@ def _control_page(role="admin"):
     }}
     updateClock();
     setInterval(updateClock, 1000);
+
+    if (window.ShutdownBanner) {{
+      window.ShutdownBanner.mountAndPoll();
+    }}
 
     // Live camera feed (2026-10-06): same proxied-MJPEG-through-/media/camera
     // approach as /media's own "Video feed" panel (see _media_page below),
@@ -1911,7 +2010,7 @@ def _control_page(role="admin"):
         thumb.addEventListener("error", () => {{
           const note = document.createElement("div");
           note.className = "map-tooltip-note";
-          note.textContent = "file no longer available (rotated out on Pi #1)";
+          note.textContent = "file no longer available (rotated out on Computer 1)";
           mapTooltip.appendChild(note);
         }});
         mapTooltip.appendChild(thumb);
@@ -2292,12 +2391,20 @@ def _control_page(role="admin"):
     // - "STOP" (was "STP"): an emergency stop must not wait on a second
     //   keystroke -- clicking it sends STP immediately, no console step at
     //   all (see the "stop" action branch below).
+    // - "Shutdown Pi #1" (2026-10-12, explicit user request): placed
+    //   directly below STOP, same "no console step, confirm first"
+    //   spirit -- sends SHD, which link/server.py routes to the exact
+    //   same _shutdown_pi() the gamepad's BTN_START already uses (see
+    //   that repo's README). A confirm() dialog guards it (see the
+    //   "shutdown" action branch below) since, unlike STP, this can't be
+    //   undone by just driving again.
     const commandButtons = [
       {{label: "NAV,4723.492,N,00044.340,W",    prefix: "NAV,"}},
       {{label: "GPS Driving",                   action: "gpsRoute"}},
       {{label: "CAM,SNAP",                      prefix: "CAM,"}},
       {{label: "Distance + angle",              action: "distanceAngle"}},
       {{label: "STOP",                          action: "stop"}},
+      {{label: "Shutdown Computer 1",           action: "shutdown"}},
     ];
 
     // Converts a signed decimal-degrees coordinate into this protocol's
@@ -2576,6 +2683,18 @@ def _control_page(role="admin"):
           btn.className = "cmd-button-danger";
           btn.title = "Immediately sends STP -- stops both motors right now";
           btn.addEventListener("click", () => sendCommand("STP"));
+        }} else if (buttonDef.action === "shutdown") {{
+          // Manual shutdown (2026-10-12, explicit user request): unlike
+          // STP, this can't be undone by just driving again, so it's
+          // guarded by a confirm() dialog -- the only command on this
+          // page that asks before sending. Sends SHD only if confirmed.
+          btn.className = "cmd-button-danger";
+          btn.title = "Shuts down Computer 1 (the robot's main computer) right now -- asks for confirmation first";
+          btn.addEventListener("click", () => {{
+            if (window.confirm("Shut down Computer 1 now? The robot will need to be physically powered back on afterwards.")) {{
+              sendCommand("SHD");
+            }}
+          }});
         }} else {{
           btn.className = "cmd-button";
           btn.addEventListener("click", () => {{
@@ -2655,7 +2774,7 @@ def _media_page(videos=None, images=None, role="admin"):
 
     .nav {{
       position: fixed;
-      top: 16px;
+      top: calc(16px + var(--shutdown-banner-h, 0px));
       left: 20px;
       display: flex;
       gap: 14px;
@@ -2677,7 +2796,7 @@ def _media_page(videos=None, images=None, role="admin"):
 
     .clock {{
       position: fixed;
-      top: 16px;
+      top: calc(16px + var(--shutdown-banner-h, 0px));
       right: 20px;
       font-family: "Courier New", monospace;
       font-size: 14px;
@@ -2694,7 +2813,7 @@ def _media_page(videos=None, images=None, role="admin"):
       flex: 1;
       display: flex;
       flex-direction: row;
-      margin-top: 72px;
+      margin-top: calc(72px + var(--shutdown-banner-h, 0px));
       min-height: 0;
       padding-bottom: 24px;
     }}
@@ -2864,6 +2983,8 @@ def _media_page(videos=None, images=None, role="admin"):
     </div>
   </div>
 
+  <script src="/static/shutdown_banner.js"></script>
+
   <script>
     function pad(n) {{ return String(n).padStart(2, "0"); }}
 
@@ -2874,6 +2995,14 @@ def _media_page(videos=None, images=None, role="admin"):
     }}
     updateClock();
     setInterval(updateClock, 1000);
+
+    // Site-wide shutdown alert banner (2026-10-12) -- see
+    // static/shutdown_banner.js. Same independent poll loop as
+    // /control (this page talks to the robot only for the camera
+    // feed proxy below, nothing that already carries this field).
+    if (window.ShutdownBanner) {{
+      window.ShutdownBanner.mountAndPoll();
+    }}
 
     // Video playlist: one video at a time, auto-advances to the next when
     // the current one ends, wrapping back to the first after the last.
@@ -3078,7 +3207,7 @@ def api_send():
     if session.get("role") == "viewer" and _command_type(command) not in VIEWER_ALLOWED_COMMANDS:
         return jsonify({"ok": False, "error": "FORBIDDEN_READ_ONLY_ACCOUNT"}), 403
 
-    result = send_command(command, ROBOT_HOST, ROBOT_PORT)
+    result = _send_command_with_fallback(command)
     return jsonify(result)
 
 
@@ -3099,7 +3228,7 @@ def api_power_history():
     backend change."""
     period = (request.args.get("period") or "day").strip().upper()
     try:
-        rows = fetch_power_history(period, ROBOT_HOST, ROBOT_PORT)
+        rows = _fetch_power_history_with_fallback(period)
     except PowerHistoryError as exc:
         return jsonify({"ok": False, "error": str(exc)}), 502
     return jsonify({"ok": True, "period": period, "rows": rows})
@@ -3115,7 +3244,7 @@ def api_solar_map():
     and returns the assembled grid cells as JSON for /control's map
     checkbox (2026-10-07, explicit user request) to draw."""
     try:
-        cells = fetch_solar_map(ROBOT_HOST, ROBOT_PORT)
+        cells = _fetch_solar_map_with_fallback()
     except PowerHistoryError as exc:
         return jsonify({"ok": False, "error": str(exc)}), 502
     return jsonify({"ok": True, "cells": cells})
@@ -3134,9 +3263,8 @@ def media_camera():
     Returns 502 quickly (instead of hanging) if the robot's camera script
     isn't running or unreachable, so whichever page is asking gets its
     fallback right away rather than a long hang."""
-    stream_url = f"http://{ROBOT_HOST}:{CAMERA_PORT}{CAMERA_STREAM_PATH}"
     try:
-        upstream = requests.get(stream_url, stream=True, timeout=CAMERA_TIMEOUT)
+        upstream = _camera_get_with_fallback(CAMERA_STREAM_PATH, stream=True, timeout=CAMERA_TIMEOUT)
     except requests.exceptions.RequestException:
         abort(502)
 
@@ -3221,9 +3349,8 @@ def media_thumb(kind, filename):
     cache_path = os.path.join(MEDIA_THUMB_CACHE_DIR, cache_name)
 
     if not os.path.isfile(cache_path):
-        url = f"http://{ROBOT_HOST}:{CAMERA_PORT}{remote_path}{filename}"
         try:
-            upstream = requests.get(url, timeout=CAMERA_TIMEOUT)
+            upstream = _camera_get_with_fallback(f"{remote_path}{filename}", timeout=CAMERA_TIMEOUT)
         except requests.exceptions.RequestException:
             abort(502)
         if upstream.status_code != 200:
@@ -3257,9 +3384,8 @@ def media_robot_feed():
     instead of breaking the page."""
     items = []
     for label, kind in (("snapshots", "photo"), ("recordings", "video")):
-        url = f"http://{ROBOT_HOST}:{CAMERA_PORT}/{label}"
         try:
-            resp = requests.get(url, timeout=CAMERA_TIMEOUT)
+            resp = _camera_get_with_fallback(f"/{label}", timeout=CAMERA_TIMEOUT)
             resp.raise_for_status()
             names = resp.json().get(label, [])
         except (requests.exceptions.RequestException, ValueError):

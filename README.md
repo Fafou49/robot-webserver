@@ -110,7 +110,7 @@ accessible depuis n'importe quel appareil du même WiFi à l'adresse :
 http://<IP_DE_LA_PI_N2>:5000/
 ```
 
-- Chez tes parents (réseau Orange), la Pi n°2 est en `192.168.1.23` →
+- Dans la zone d'essais (réseau Orange), la Pi n°2 est en `192.168.1.23` →
   `http://192.168.1.23:5000/`
 - Chez toi (Bbox), la Pi n°2 est en `192.168.1.179` →
   `http://192.168.1.179:5000/`
@@ -179,6 +179,46 @@ ROBOT_PORT=5050
 Si le robot est injoignable (éteint, mauvaise IP, port fermé), la console
 affiche l'erreur en rouge au lieu de planter — la commande `STA` (sans
 argument) renvoie l'état courant du robot, utile pour vérifier la liaison.
+
+### Plusieurs adresses possibles pour la Pi n°1 (`ROBOT_HOST_CANDIDATES`, 2026-10-17)
+
+La Pi n°1 n'a jamais qu'une seule IP réelle à la fois, mais ce n'est pas
+toujours la même : son IP fixe à la maison (Bbox), ou une IP temporaire
+différente pendant un essai sur un point d'accès mobile (zone d'essais).
+Avant cette date, changer de réseau voulait dire éditer `ROBOT_HOST` à la
+main puis redémarrer le service à chaque aller-retour — sans quoi ni la
+caméra ni le point GPS ne s'affichaient (tout `/api/send`, l'historique et
+le flux caméra passent par cette même adresse).
+
+Il suffit maintenant de lister toutes les adresses possibles, séparées
+par des virgules, dans `ROBOT_HOST_CANDIDATES` :
+
+```
+ROBOT_HOST_CANDIDATES=192.168.1.180,10.88.252.73
+```
+
+`app.py` (voir `robot_host.py`) essaie ces adresses dans l'ordre et retient
+celle qui répond, sans redemander à chaque requête — seule la première
+requête suivant un changement de réseau paie le coût d'essayer l'ancienne
+adresse avant de retrouver la bonne ; toutes les suivantes vont directement
+à la bonne adresse jusqu'au prochain changement. Les commandes de contrôle
+(port `ROBOT_PORT`) et le flux caméra (port `CAMERA_PORT`) sont suivis par
+**deux résolveurs indépendants** : si le script caméra plante seul sur la
+Pi n°1, ça ne doit pas faire croire à tort que l'adresse entière est
+mauvaise pour les commandes de pilotage, qui continuent de fonctionner.
+
+`ROBOT_HOST` reste lu comme avant si `ROBOT_HOST_CANDIDATES` n'est pas
+défini (comportement identique à avant cette date, une seule adresse).
+
+Cette bascule ne concerne que les échanges Pi n°2 → Pi n°1 (commandes,
+historique, caméra) : le navigateur ne parle jamais directement à la
+Pi n°1, il ne voit que ce serveur (voir "Caméra en direct" plus bas). Pour
+joindre **la Pi n°2 elle-même** depuis ton navigateur/PC en changeant de
+réseau, il n'y a pas d'équivalent automatique — il faut toujours connaître
+l'IP actuelle de la Pi n°2 sur le réseau du moment (ou tenter
+`http://raspberrypi.local:5000` si Avahi/mDNS répond sur ce réseau, avec
+la réserve habituelle que la résolution `.local` n'est pas garantie fiable
+depuis un PC Windows).
 
 Le panneau **Controls** (à gauche de `/control`) propose aussi un bouton
 par type de trame de commande (STP, DRV, NAV, MOD, PID, CAM, STA), pleine
@@ -596,3 +636,125 @@ sudo systemctl disable robot-webserver.service    # ne redémarre plus tout seul
   cet environnement (pas de vraie Pi ni de `systemd` actif ici). À
   tester avec un vrai redémarrage avant de s'y fier pour un déploiement
   sur le terrain.
+
+## Bandeau d'alerte arrêt imminent + bouton d'arrêt manuel (`static/shutdown_banner.js`, 2026-10-12)
+
+Demande explicite de l'utilisateur, verbatim : « je veux que si je ne
+peux pas atteindre la journée de charge suivante, alors le site
+internet affiche un bandeau d'alerte rouge et jaune indiquant l'heure
+ou la pi1 va s'éteindre [...] sur toutes les pages. utilise la moyenne
+glissante [...] ajoute un bouton d'arrêt sous STOP qui éteints la PI 1
+[...] affiche un décompte dans le bandeau critique. de plus rédiges ce
+bandeau et tout le site en anglais. » Fait suite à un premier mockup
+(`mockup_shutdown_alert.html`, dépôt `robot`) construit à partir d'une
+question posée plus tôt dans la même conversation (différence entre
+« until empty » et « projected reserve » — voir ce dépôt) ; la
+fonctionnalité réelle en diffère sur un point important : **le site ne
+recalcule plus rien lui-même** (pas de lever/coucher de soleil, pas de
+jour/nuit, pas de moyenne glissante côté JS) — tout vient d'un seul
+nombre envoyé par la Pi #1, `shutdown_eta_ts` (voir le dépôt `robot`,
+section « Arrêt automatique de la Pi #1 » de son README et
+`link/shutdown_policy.py`), 18ᵉ champ de la trame `PWR`, extension
+en fin de trame existante (même convention que `cpu_temp`/
+`onboard_time`/`uptime_s` ci-dessus — une Pi #1 plus ancienne qui ne
+l'envoie pas encore est traitée comme « rien de programmé », jamais
+devinée). C'est la Pi #1 qui utilise déjà la moyenne glissante sur 5
+minutes pour ce calcul (`link.power_projection.PowerAverager`, demande
+explicite de l'utilisateur) ; le site n'a plus qu'à afficher ce qu'elle
+lui dit.
+
+**Note de terminologie (2026-10-12, demande explicite de
+l'utilisateur) :** ce README et les commentaires de code continuent de
+dire « Pi #1 »/« Pi #2 » (c'est ce qu'elles sont, techniquement), mais
+le texte réellement affiché sur les 3 pages actives du site (`/control`,
+`/power`, `/media` — bandeau, bouton d'arrêt, info-bulles) dit
+désormais **« Computer 1 »**/**« Computer 2 »**, jamais « Pi #1 »/« Pi
+#2 ». Si une capture d'écran ou un futur mockup du site ne correspond
+pas à cette règle, c'est que la source dont il vient date d'avant ce
+changement.
+
+### Un seul module partagé : `static/shutdown_banner.js`
+
+`app.py` n'a pas de couche de template commune — `_control_page()` et
+`_media_page()` sont deux f-strings Python HTML autonomes, et
+`pages/power.html` est un fichier statique séparé (voir "Structure"
+plus haut). Plutôt que trois copies du même bandeau, ce fichier
+JavaScript unique est chargé par les trois pages (`<script
+src="/static/shutdown_banner.js">`) et expose `window.ShutdownBanner` :
+
+- `mount()` : injecte le CSS et le markup du bandeau une seule fois
+  (idempotent) ;
+- `updateFromPwrFields(fields)` : reçoit le tableau brut `fields` d'une
+  réponse `PWR` et met à jour l'affichage — c'est ce qu'appelle
+  `pages/power.html` depuis son propre sondage `PWR` existant (3s,
+  `fetchPowerSnapshot()`), puisque cette page interroge déjà le robot
+  pour son propre tableau de bord ;
+- `mountAndPoll()` : pour `/control` et `/media`, qui n'interrogeaient
+  jusqu'ici jamais `PWR` — fait son propre sondage léger et indépendant
+  (toutes les 5s par défaut) juste pour ce champ, via le même endpoint
+  `/api/send` que le reste du site (`PWR` fait déjà partie de
+  `VIEWER_ALLOWED_COMMANDS`, donc un compte invité peut aussi le
+  déclencher sans changement de rôle à faire).
+
+Caché entièrement (`display: none`) tant que `shutdown_eta_ts` vaut 0 —
+pas de bandeau du tout, c'est à ça que ressemble "tout va bien" ici,
+pas un bandeau vert redondant avec le reste du site. Deux paliers de
+sévérité repris du mockup, codés en dur côté JS
+(`SHUTDOWN_CRITICAL_H = 2.0`, pas une valeur demandée explicitement —
+même esprit que `SAFETY_MARGIN_HOURS` côté robot, à ajuster après
+usage réel) : **jaune** (« Warning ») au-delà de ce seuil, **rouge**
+(« Critical », fond à rayures façon zone de danger) en dessous — avec,
+demande explicite de l'utilisateur, un **décompte en direct** (`HH:MM:SS`,
+recalé à chaque tick d'une seconde) **uniquement** dans le bandeau
+critique ; le palier jaune affiche une durée plus grossière (`Xh YY`),
+recalculée à chaque sondage plutôt que tiquée en continu.
+
+### Positionnement : `position: fixed` + variable CSS `--shutdown-banner-h`
+
+Le bandeau est fixé en haut de la fenêtre (`position: fixed; top: 0`),
+par-dessus tout le reste, pour ne jamais dépendre de la structure
+propre à chacune des trois pages. Pour autant, il ne doit rien
+recouvrir : sa hauteur réellement rendue (mesurée après que le texte
+final soit posé, pas avant — un bug de ce genre a été attrapé et
+corrigé pendant le développement, voir le commentaire de
+`setBannerHeightVar()` dans le fichier) est publiée comme variable CSS
+`--shutdown-banner-h` sur `<html>`. Chaque page lit cette variable à
+l'endroit précis où elle en a besoin plutôt que de se faire repousser
+aveuglément : `.nav`/`.clock` (position fixe, `top: calc(16px +
+var(--shutdown-banner-h, 0px))`) et `.status-bar`/`.main-area`
+(`margin-top: calc(... + var(--shutdown-banner-h, 0px))`) dans
+`_control_page()`/`_media_page()` (`app.py`), `padding-top` du `body`
+dans `pages/power.html`. Vérifié visuellement (captures Playwright,
+avant/après le correctif de mesure ci-dessus) sur les trois pages, aux
+trois états (rien programmé, jaune, rouge) : aucun chevauchement avec
+le bandeau de nav/horloge fixe ou le contenu de la page, dans aucun
+des trois cas.
+
+### Bouton d'arrêt manuel : `SHD`
+
+Nouveau bouton **"Shutdown Pi #1"**, placé directement sous **STOP**
+dans le panneau Controls de `/control` (`commandButtons` dans
+`app.py`) — demande explicite de l'utilisateur. Réutilise le style
+`.cmd-button-danger` déjà utilisé par STOP. Contrairement à STOP (qui
+envoie `STP` instantanément), ce bouton demande confirmation
+(`window.confirm(...)`) avant d'envoyer `SHD` — un arrêt ne se
+rattrape pas en reprenant simplement la main sur les moteurs. Côté
+robot, `SHD` appelle directement `ControlServer._shutdown_pi()`
+(dépôt `robot`, voir la section dédiée de son README) : exactement le
+même mécanisme déjà existant et déjà testé que le bouton `START` de la
+manette, aucun nouveau code d'extinction écrit ici. Comme tout bouton
+du panneau Controls, invisible pour un compte "invité" en lecture
+seule — ce panneau n'existe même pas dans le HTML généré pour ce rôle
+(voir "Envoyer des commandes au robot" plus haut), donc rien de
+spécifique n'a été ajouté côté contrôle de rôle pour ce bouton.
+
+**Non testé sur le matériel réel** (même réserve que pour le reste du
+projet). Vérifié dans ce bac à sable : rendu visuel des trois paliers
+sur les trois pages (captures Playwright), absence de chevauchement
+avec chaque page après le correctif de `setBannerHeightVar()`, décompte
+qui tique réellement seconde par seconde en palier critique, bouton
+`SHD` qui envoie bien la commande attendue une fois la confirmation
+acceptée (et rien du tout si elle est annulée) — vérifié en lançant
+`app.py` localement avec un `ROBOT_HOST` injoignable (pas de vraie Pi
+#1 dans ce bac à sable) et en interceptant la requête `/api/send`
+envoyée par le navigateur.
