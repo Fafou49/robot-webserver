@@ -1,0 +1,371 @@
+<!-- stats.html -- distance/exploration, energy, and ultrasonic-obstacle
+     statistics page (2026-10-18), analogous to pages/power.html: a
+     dashboard of small cards, polled from a single JSON endpoint rather
+     than server-rendered.
+
+     Backed by link/power_history.py's fetch_stats_summary() (new STS
+     sentence in link/server.py), fetched here via GET
+     /api/stats_summary (see app.py and power_history_client.py). Two
+     different kinds of card on this page:
+
+       READY TODAY -- Distance & exploration and Energy / battery are
+       computed from tables that are already being logged on Pi #1
+       (solar_survey_raw, power_log) -- real numbers, no caveats.
+
+       Ultrasonic sensors (front / rear detection counts) is also a
+       REAL query against a REAL table (obstacle_log) -- but that table
+       has no writer yet: the front/rear ultrasonic sensors and the
+       GPIO polling loop that would call log_obstacle() don't exist as
+       of this writing. The counts will legitimately read 0 until then
+       -- that's an honest "nothing logged yet", not a placeholder, and
+       no further website change will be needed once the hardware and
+       its Pi #1 code land (see the "Pi 1 implementation notes" doc
+       delivered alongside this page).
+
+       GPS fix quality and Manual / Auto ratio are explicit "not logged
+       yet" placeholders -- no backend table exists for either, and
+       this page makes no API call for them. LoRa link is an explicit
+       "hardware not installed yet" placeholder -- the radio link
+       itself doesn't exist, so there's nothing to query at all.
+
+     Served by app.py's @app.route("/stats") (static send_from_directory,
+     like pages/power.html), behind the same @login_required guard as
+     /control. No role check: read-only, like /power.
+
+     /api/stats_summary CONTRACT (confirmed from the real app.py):
+       GET /api/stats_summary
+       Success: {"ok": true, "summary": {
+         total_distance_m, avg_speed_moving_mps, best_daily_distance_m,
+         solar_harvested_kwh, energy_consumed_kwh,
+         best_solar_day_kwh, worst_solar_day_kwh,
+         obstacle_front_count, obstacle_rear_count
+       }}
+       Failure: {"ok": false, "error": "..."} -- robot unreachable. -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Stats — Robot</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --surface: #171a21;
+    --surface-raised: #1f232c;
+    --border: #2a2f3a;
+    --text-primary: #e8eaed;
+    --text-secondary: #9aa3b2;
+    --text-muted: #6b7280;
+    --accent: #4da3ff;
+    --status-critical: #d03b3b;
+    --status-serious:  #ec835a;
+    --status-warning:  #fab219;
+    --status-good:     #0ca30c;
+    /* Validated categorical pair for the Manual/Auto gauge (dataviz
+       skill's own reference ramp, slots 1/2 -- already checked against
+       this exact dark surface: node scripts/validate_palette.js
+       "#3987e5,#d95926,#199e70" --mode dark --surface "#171a21" ->
+       ALL CHECKS PASS). */
+    --series-auto: #3987e5;
+    --series-manual: #d95926;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text-primary);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+    padding-top: calc(12px + var(--shutdown-banner-h, 0px));
+    padding-right: 14px;
+    padding-bottom: 20px;
+    padding-left: 14px;
+  }
+  .page-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin-bottom: 14px;
+  }
+  .page-header h1 { font-size: 18px; font-weight: 600; margin: 0; }
+  nav.top-nav a { color: var(--text-secondary); text-decoration: none; margin-right: 14px; font-size: 13px; }
+  nav.top-nav a:hover { color: var(--accent); }
+
+  .status-badge {
+    display: inline-flex; align-items: center; gap: 7px;
+    padding: 5px 11px; border-radius: 999px; font-size: 12px; font-weight: 600;
+    background: var(--surface-raised); border: 1px solid var(--border);
+  }
+  .status-badge .dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+  .status-badge.ok .dot { background: var(--status-good); box-shadow: 0 0 6px var(--status-good); }
+  .status-badge.ok { color: var(--status-good); }
+  .status-badge.down .dot { background: var(--status-critical); }
+  .status-badge.down { color: var(--status-critical); }
+
+  .dashboard {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 14px;
+    align-items: start;
+  }
+  @media (max-width: 860px) { .dashboard { grid-template-columns: 1fr; } }
+  .col { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 14px 16px;
+  }
+  .section-title {
+    font-size: 12.5px; text-transform: uppercase; letter-spacing: 0.07em;
+    color: var(--text-secondary); margin: 0 0 10px; display: flex; align-items: center; gap: 8px;
+  }
+  /* "This is real but currently empty, by design" -- used only for
+     Ultrasonic sensors below, whose table/query are real but have no
+     writer yet. Distinct wording from .badge-planned on purpose: this
+     one needs no further website change, the other does. */
+  .badge-pending {
+    font-size: 10px; text-transform: none; letter-spacing: 0; font-weight: 600;
+    color: #2a1f05; background: var(--status-warning); border-radius: 4px; padding: 2px 6px;
+  }
+  /* "Nothing to query yet -- the hardware/link itself doesn't exist."
+     Deliberately neutral (reuses existing surface/border/text tokens
+     rather than a new hue) rather than amber: this isn't "needs a
+     logging fix", it's "needs hardware first". */
+  .badge-planned {
+    font-size: 10px; text-transform: none; letter-spacing: 0; font-weight: 600;
+    color: var(--text-secondary); background: var(--surface-raised);
+    border: 1px solid var(--border); border-radius: 4px; padding: 1px 6px;
+  }
+
+  .tile-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+  .tile-grid.cols-2 { grid-template-columns: repeat(2, 1fr); }
+  @media (max-width: 520px) { .tile-grid, .tile-grid.cols-2 { grid-template-columns: 1fr 1fr; } }
+  .stat-tile {
+    background: var(--surface-raised); border: 1px solid var(--border); border-radius: 8px;
+    padding: 10px 12px; display: flex; flex-direction: column; gap: 4px; min-width: 0;
+  }
+  .stat-tile .label { font-size: 11px; color: var(--text-secondary); }
+  .stat-tile .value { font-size: 19px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .stat-tile .value .unit { font-size: 12px; font-weight: 400; color: var(--text-secondary); margin-left: 3px; }
+  .stat-tile.stale .value { color: var(--text-muted); }
+
+  .card-note {
+    font-size: 11.5px; color: var(--text-secondary); line-height: 1.5; margin: 10px 0 0;
+  }
+
+  /* Dual-segment gauge, shared markup/JS for GPS fix quality and
+     Manual/Auto -- both are a 0..100% split between two named sides. */
+  .gauge-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 10px; }
+  .gauge-head .side { display: flex; flex-direction: column; gap: 2px; }
+  .gauge-head .side.right { align-items: flex-end; }
+  .gauge-head .pct { font-size: 20px; font-weight: 700; line-height: 1; font-variant-numeric: tabular-nums; }
+  .gauge-head .name { font-size: 11.5px; color: var(--text-secondary); display: flex; align-items: center; gap: 5px; }
+  .gauge-head .swatch { width: 9px; height: 9px; border-radius: 2px; display: inline-block; }
+  .gauge-track { position: relative; height: 12px; border-radius: 6px; overflow: hidden; display: flex; background: var(--border); }
+  .gauge-fill { height: 100%; }
+
+  .footer-note {
+    border-top: 1px solid var(--border);
+    margin-top: 16px; padding-top: 12px;
+  }
+  .footer-note h3 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-secondary); margin: 10px 0 5px; }
+  .footer-note h3:first-child { margin-top: 0; }
+  .footer-note p { font-size: 12px; color: var(--text-secondary); line-height: 1.6; margin: 0 0 4px; }
+  .footer-note b { color: var(--text-primary); font-weight: 600; }
+  .footer-note .pending { color: var(--status-warning); }
+</style>
+</head>
+<body>
+
+  <div class="page-header">
+    <div>
+      <h1>Stats — Distance, Energy &amp; Obstacles</h1>
+      <nav class="top-nav">
+        <a href="/control">&larr; Control page</a>
+        <a href="/media">Media</a>
+        <a href="/power">Power</a>
+        <a href="/pages">Pages</a>
+      </nav>
+    </div>
+    <span id="statusBadge" class="status-badge down">
+      <span class="dot"></span>
+      <span id="statusLabel">Connecting&hellip;</span>
+    </span>
+  </div>
+
+  <div class="dashboard">
+    <div class="col">
+
+      <div class="card">
+        <div class="section-title">Distance &amp; exploration</div>
+        <div class="tile-grid" id="distanceGrid"></div>
+      </div>
+
+      <div class="card">
+        <div class="section-title">Energy / battery</div>
+        <div class="tile-grid cols-2" id="energyGrid"></div>
+      </div>
+
+      <div class="card">
+        <div class="section-title">LoRa link <span class="badge-planned">hardware not installed yet</span></div>
+        <div class="tile-grid cols-2">
+          <div class="stat-tile stale"><div class="label">&#8594; Bytes sent (TX)</div><div class="value">0<span class="unit">B</span></div></div>
+          <div class="stat-tile stale"><div class="label">&#8592; Bytes received (RX)</div><div class="value">0<span class="unit">B</span></div></div>
+        </div>
+        <p class="card-note">
+          Cumulative counters, incremented on every frame sent/received over the LoRa
+          link once it replaces WiFi for long-range control. Neither the radio link nor
+          the counters exist yet on Pi #1.
+        </p>
+      </div>
+
+    </div>
+
+    <div class="col">
+
+      <div class="card">
+        <div class="section-title">GPS fix quality <span class="badge-pending">needs new logging</span></div>
+        <div class="gauge-head">
+          <div class="side"><span class="pct">0%</span><span class="name"><span class="swatch" style="background: var(--status-good);"></span>DGPS</span></div>
+          <div class="side right"><span class="pct">0%</span><span class="name">GPS (standard)<span class="swatch" style="background: var(--status-warning);"></span></span></div>
+        </div>
+        <div class="gauge-track">
+          <div class="gauge-fill" style="width: 0%; background: var(--status-good);"></div>
+          <div class="gauge-fill" style="width: 0%; background: var(--status-warning);"></div>
+          <div class="gauge-fill" style="width: 100%; background: var(--border);"></div>
+        </div>
+        <p class="card-note">
+          Share of driving time with a DGPS (NTRIP) correction vs a plain GPS fix. Not
+          computable yet: the fix type is not historized over time today, only the
+          latest reading is known.
+        </p>
+      </div>
+
+      <div class="card">
+        <div class="section-title">Ultrasonic sensors (front / rear) <span class="badge-planned">hardware not installed yet</span></div>
+        <div class="tile-grid cols-2" id="obstacleGrid"></div>
+        <p class="card-note">
+          Real counts from a real table (<code>obstacle_log</code>) -- legitimately 0
+          until the front/rear ultrasonic sensors exist and start logging. See the
+          <b>Obstacle map (ultrasonic)</b> layer on the <a href="/control">Control page</a>'s
+          map once readings start arriving.
+        </p>
+      </div>
+
+      <div class="card">
+        <div class="section-title">Manual / Auto ratio <span class="badge-pending">needs new logging</span></div>
+        <div class="gauge-head">
+          <div class="side"><span class="pct">0%</span><span class="name"><span class="swatch" style="background: var(--series-manual);"></span>Manual</span></div>
+          <div class="side right"><span class="pct">0%</span><span class="name">Auto<span class="swatch" style="background: var(--series-auto);"></span></span></div>
+        </div>
+        <div class="gauge-track">
+          <div class="gauge-fill" style="width: 0%; background: var(--series-manual);"></div>
+          <div class="gauge-fill" style="width: 0%; background: var(--series-auto);"></div>
+          <div class="gauge-fill" style="width: 100%; background: var(--border);"></div>
+        </div>
+        <p class="card-note">
+          Share of driving time in manual (gamepad) vs auto (GPS autopilot) mode. Not
+          computable yet: the current drive mode is not timestamped in the database today.
+        </p>
+      </div>
+
+    </div>
+  </div>
+
+  <div class="footer-note" id="lastUpdateNote">Waiting for the first reading&hellip;</div>
+
+  <div class="footer-note">
+    <h3>Ready today</h3>
+    <p><b>Distance &amp; exploration</b> and <b>Energy / battery</b> -- computed from
+       <code>solar_survey_raw</code> / <code>power_log</code>, already logged on Pi #1.</p>
+    <p><b>Ultrasonic sensors</b> -- real query against a real table
+       (<code>obstacle_log</code>), reading 0 honestly until the sensors exist.</p>
+    <h3>Needs a software addition on Pi #1 (<span class="pending">needs new logging</span>)</h3>
+    <p><b>GPS fix quality</b> and <b>Manual / Auto ratio</b> -- no hardware blocker, just
+       no history table for either yet.</p>
+    <h3>Needs hardware first</h3>
+    <p><b>LoRa byte counters</b> and the data behind <b>Ultrasonic sensors</b> above --
+       see the "Pi 1 implementation notes" doc for exactly what each one is waiting on.</p>
+  </div>
+
+  <!-- Site-wide shutdown alert banner (2026-10-12) -- see
+       static/shutdown_banner.js. This page has no PWR poll of its own
+       (unlike pages/power.html), so mountAndPoll() below runs its own
+       independent, lightweight poll loop just for this one field, same
+       as /control and /media do. -->
+  <script src="/static/shutdown_banner.js"></script>
+
+  <script>
+    const POLL_INTERVAL_MS = 15000; // the underlying numbers only change on
+    // Pi #1's own 5-minute logging tick -- no need to poll faster than this.
+
+    function fmt(value, decimals) {
+      return Number.isFinite(value) ? value.toFixed(decimals) : "—";
+    }
+
+    function makeTile(container, label, value, unit, decimals) {
+      const tile = document.createElement("div");
+      tile.className = "stat-tile";
+      tile.innerHTML =
+        `<div class="label">${label}</div>` +
+        `<div class="value">${fmt(value, decimals)}<span class="unit">${unit}</span></div>`;
+      container.appendChild(tile);
+    }
+
+    function setStatus(available, label) {
+      const badge = document.getElementById("statusBadge");
+      const labelEl = document.getElementById("statusLabel");
+      badge.classList.toggle("ok", available);
+      badge.classList.toggle("down", !available);
+      labelEl.textContent = label || (available ? "Live" : "Unavailable");
+    }
+
+    async function pollStats() {
+      try {
+        const res = await fetch("/api/stats_summary");
+        if (!res.ok) throw new Error("HTTP " + res.status);
+        const data = await res.json();
+        if (!data.ok) throw new Error(data.error || "robot returned an error");
+        const s = data.summary;
+
+        const distanceGrid = document.getElementById("distanceGrid");
+        distanceGrid.innerHTML = "";
+        makeTile(distanceGrid, "Total distance", s.total_distance_m / 1000, "km", 1);
+        makeTile(distanceGrid, "Average speed (moving)", s.avg_speed_moving_mps, "m/s", 2);
+        makeTile(distanceGrid, "Best daily distance", s.best_daily_distance_m / 1000, "km", 2);
+
+        const energyGrid = document.getElementById("energyGrid");
+        energyGrid.innerHTML = "";
+        makeTile(energyGrid, "Solar energy harvested", s.solar_harvested_kwh, "kWh", 2);
+        makeTile(energyGrid, "Energy consumed", s.energy_consumed_kwh, "kWh", 2);
+        makeTile(energyGrid, "Best solar day", s.best_solar_day_kwh, "kWh", 2);
+        makeTile(energyGrid, "Worst solar day", s.worst_solar_day_kwh, "kWh", 2);
+
+        const obstacleGrid = document.getElementById("obstacleGrid");
+        obstacleGrid.innerHTML = "";
+        makeTile(obstacleGrid, "Front detections (total)", s.obstacle_front_count, "", 0);
+        makeTile(obstacleGrid, "Rear detections (total)", s.obstacle_rear_count, "", 0);
+
+        setStatus(true, "Live");
+        document.getElementById("lastUpdateNote").textContent =
+          "Last updated " + new Date().toLocaleTimeString();
+      } catch (err) {
+        setStatus(false, "Unavailable");
+        console.warn("stats fetch failed:", err.message);
+      }
+    }
+
+    pollStats();
+    setInterval(pollStats, POLL_INTERVAL_MS);
+
+    if (window.ShutdownBanner) {
+      window.ShutdownBanner.mountAndPoll();
+    }
+  </script>
+
+</body>
+</html>

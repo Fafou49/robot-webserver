@@ -27,7 +27,13 @@ from dotenv import load_dotenv
 from flask import Flask, Response, abort, jsonify, redirect, request, send_from_directory, session, url_for
 from werkzeug.security import check_password_hash
 
-from power_history_client import PowerHistoryError, fetch_power_history, fetch_solar_map
+from power_history_client import (
+    PowerHistoryError,
+    fetch_obstacle_points,
+    fetch_power_history,
+    fetch_solar_map,
+    fetch_stats_summary,
+)
 from robot_host import RobotHostResolver
 from robot_link import send_command
 
@@ -184,6 +190,43 @@ def _fetch_solar_map_with_fallback():
             continue
         ROBOT_CONTROL_RESOLVER.report_success(host)
         return cells
+    raise last_exc
+
+
+def _fetch_stats_summary_with_fallback():
+    """Same idea as _fetch_power_history_with_fallback(), for the new
+    STS (stats summary) fetch -- see power_history_client.
+    fetch_stats_summary() and link/power_history.py's own
+    fetch_stats_summary()."""
+    last_exc = None
+    for host in ROBOT_CONTROL_RESOLVER.ordered():
+        try:
+            summary = fetch_stats_summary(host, ROBOT_PORT)
+        except PowerHistoryError as exc:
+            ROBOT_CONTROL_RESOLVER.report_failure(host)
+            last_exc = exc
+            continue
+        ROBOT_CONTROL_RESOLVER.report_success(host)
+        return summary
+    raise last_exc
+
+
+def _fetch_obstacle_points_with_fallback():
+    """Same idea as _fetch_solar_map_with_fallback(), for the new OBS
+    (ultrasonic obstacle log) fetch -- see power_history_client.
+    fetch_obstacle_points(). Legitimately returns an empty list until
+    the ultrasonic sensors exist, same as that function's own
+    docstring."""
+    last_exc = None
+    for host in ROBOT_CONTROL_RESOLVER.ordered():
+        try:
+            points = fetch_obstacle_points(host, ROBOT_PORT)
+        except PowerHistoryError as exc:
+            ROBOT_CONTROL_RESOLVER.report_failure(host)
+            last_exc = exc
+            continue
+        ROBOT_CONTROL_RESOLVER.report_success(host)
+        return points
     raise last_exc
 
 
@@ -904,6 +947,76 @@ def _control_page(role="admin"):
     }}
     .solar-legend-note {{ color: #656d76; font-style: italic; }}
 
+    /* Obstacle map overlay (2026-10-18): toggleable layer of points
+       logged by the front/rear ultrasonic sensors -- see
+       link/power_history.py's obstacle_log table + OBS sentence,
+       fetched via /api/obstacle_map -> power_history_client.py's
+       fetch_obstacle_points(). Same toggle-row family as
+       .solar-toggle-row above (own dashed divider, same label/legend
+       shape) rather than a shared class, since the two rows' legends
+       differ (gradient bar vs a plain swatch + count). NO SENSOR DATA
+       YET as of this writing -- the row renders, the checkbox works,
+       the layer legitimately shows "0 points" until the hardware and
+       its Pi #1 logging code exist (see the "Pi 1 implementation
+       notes" doc) -- this is provisioned ahead of that, same spirit as
+       the backend table/frame it reads from. */
+    .obstacle-toggle-row {{
+      flex: 0 0 auto;
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      flex-wrap: wrap;
+      font-size: 11px;
+      color: #8b949e;
+      padding-top: 6px;
+      border-top: 1px dashed #30363d;
+    }}
+    .obstacle-toggle-label {{
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 12px;
+      color: #c9d1d9;
+      cursor: pointer;
+      user-select: none;
+    }}
+    .obstacle-toggle-label input {{ accent-color: #58a6ff; cursor: pointer; }}
+    .obstacle-legend {{
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 10.5px;
+      color: #8b949e;
+    }}
+    .obstacle-legend[hidden] {{ display: none; }}
+    /* Plain black square, same idea as .map-dot above but square rather
+       than round -- a ultrasonic echo is a "pixel went dark" reading,
+       not a point-of-interest marker, so it deliberately doesn't share
+       the circular dot vocabulary used for robot/waypoint/route/media. */
+    .obstacle-swatch {{
+      display: inline-block;
+      width: 8px;
+      height: 8px;
+      border-radius: 1.5px;
+      border: 1px solid #1b1f24;
+      background: #000;
+    }}
+    /* Small fixed-position compass rose, top-right of the map itself --
+       added alongside the obstacle layer since each point is now placed
+       by distance + heading-from-north (see drawObstaclePoints() below),
+       so "which way is north" is suddenly relevant to reading the map,
+       unlike every other existing marker here (plain lat/lon). Fixed to
+       the map's own frame, not the projected coordinate space, since it
+       answers a question about the page, not about a GPS point. */
+    .compass-rose {{
+      position: absolute;
+      top: 8px;
+      right: 8px;
+      width: 30px;
+      height: 30px;
+      pointer-events: none;
+    }}
+
     /* Distance scale bar (bottom-left of the map, drawn fresh on every
        redraw -- see drawMapScaleBar() below): plain SVG line/text
        elements, styled here rather than with setAttribute so they read
@@ -1087,6 +1200,35 @@ def _control_page(role="admin"):
     .cmd-button-danger:hover {{ background: #3d181b; border-color: #ff7b72; }}
     .cmd-button-danger:active {{ background: #24100f; }}
 
+    /* Camera buttons (2026-10-18): replace the old single "CAM,SNAP"
+       fill-then-Enter button with two direct-send buttons, same spirit as
+       STOP/Shutdown above (clicking sends immediately, nothing to type) --
+       see the "snap"/"record" action branches below. Left plain .cmd-button
+       styling (not the red danger look) since neither is an emergency
+       action; "Record" gains a red/pulsing look only while actually
+       recording, so its state reads at a glance. */
+    .cmd-button-record.recording {{
+      background: #2d1214;
+      border-color: #f85149;
+      color: #ffb3ac;
+    }}
+    .cmd-button-record.recording:hover {{ background: #3d181b; border-color: #ff7b72; }}
+    .cmd-button-record .rec-dot {{ display: none; }}
+    .cmd-button-record.recording .rec-dot {{
+      display: inline-block;
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: #f85149;
+      margin-right: 7px;
+      animation: cmd-record-pulse 1.1s infinite;
+    }}
+    @keyframes cmd-record-pulse {{
+      0%   {{ box-shadow: 0 0 0 0 rgba(248, 81, 73, 0.45); }}
+      70%  {{ box-shadow: 0 0 0 6px rgba(248, 81, 73, 0); }}
+      100% {{ box-shadow: 0 0 0 0 rgba(248, 81, 73, 0); }}
+    }}
+
     /* "Distance + angle" (2026-09-12): a small inline form that drops
        down under its button instead of prefilling the console -- the two
        numbers it needs (distance, angle) don't fit the "prefix + type the
@@ -1162,6 +1304,7 @@ def _control_page(role="admin"):
   <div class="nav">
     <a href="{url_for('power')}">Power</a>
     <a href="{url_for('media')}">Media</a>
+    <a href="{url_for('stats')}">Stats</a>
     <a href="{url_for('pages_index')}">Pages</a>
     <a href="{url_for('logout')}">Log out</a>
     {'<span class="viewer-badge">Read-only access</span>' if is_viewer else ''}
@@ -1239,12 +1382,22 @@ def _control_page(role="admin"):
       <h2>Map</h2>
       <div class="map-wrap">
         <svg id="gpsMap" class="gps-map" viewBox="0 0 400 400" preserveAspectRatio="xMidYMid meet"></svg>
+
+        <svg class="compass-rose" viewBox="0 0 40 40" aria-hidden="true">
+          <circle cx="20" cy="20" r="17" fill="#eef0f2" stroke="#b9c0c9" stroke-width="1"/>
+          <line x1="20" y1="6" x2="20" y2="34" stroke="#b9c0c9" stroke-width="1"/>
+          <line x1="6" y1="20" x2="34" y2="20" stroke="#b9c0c9" stroke-width="1"/>
+          <path d="M20,8 L23,20 L20,17.5 L17,20 Z" fill="#f85149"/>
+          <text x="20" y="6.5" text-anchor="middle" font-size="7" font-weight="700" fill="#41464c">N</text>
+        </svg>
+
         <div class="map-tooltip" id="mapTooltip" hidden></div>
         <div class="map-legend">
           <span><i class="map-dot map-dot-robot"></i>Robot</span>
           <span><i class="map-dot map-dot-waypoint"></i>Waypoints</span>
           <span><i class="map-dot map-dot-route"></i>NAV / GPS Driving</span>
           <span><i class="map-dot map-dot-media"></i>Photos / Videos</span>
+          <span><i class="obstacle-swatch"></i>Obstacles (ultrasonic)</span>
           <span class="map-hint">Scroll to zoom &middot; double-click to reset &middot; right-click any point to delete</span>
         </div>
         <div class="solar-toggle-row">
@@ -1257,6 +1410,16 @@ def _control_page(role="admin"):
             <span class="solar-gradient-bar"></span>
             High
             <span class="solar-legend-note" id="solarLegendNote"></span>
+          </span>
+        </div>
+        <div class="obstacle-toggle-row">
+          <label class="obstacle-toggle-label">
+            <input type="checkbox" id="obstacleMapToggle">
+            Obstacle map (ultrasonic)
+          </label>
+          <span class="obstacle-legend" id="obstacleLegend" hidden>
+            <i class="obstacle-swatch"></i>
+            <span class="obstacle-legend-note" id="obstacleLegendNote"></span>
           </span>
         </div>
       </div>
@@ -1784,6 +1947,120 @@ def _control_page(role="admin"):
     // checkbox is off, so this never fires an unnecessary request.
     setInterval(pollSolarMap, 30000);
 
+    // ---- Ultrasonic obstacle map overlay (2026-10-18) ----
+    // Toggleable scatter of points logged by the front/rear ultrasonic
+    // sensors (see link/power_history.py's obstacle_log table + OBS
+    // sentence, fetched via /api/obstacle_map -> power_history_
+    // client.py's fetch_obstacle_points()). Each logged row is the
+    // ROBOT's own position at echo time plus distance_m/heading_deg --
+    // not a ready-made obstacle position (see that table's own comment
+    // for why) -- so this is the one place that turns it into an actual
+    // point to draw, via destinationPoint() above (the same forward-
+    // geodesic helper the "Distance + angle" button already uses).
+    // Drawn above the solar overlay but still behind every marker/line
+    // (see drawObstaclePoints()'s own comment and redrawMap() below)
+    // and, like solarCells, excluded from computeBounds() -- this layer
+    // should never decide the zoom level either.
+    //
+    // NO SENSOR DATA YET as of this writing -- /api/obstacle_map
+    // legitimately returns an empty list until the hardware and its
+    // Pi 1 logging code exist (see the "Pi 1 implementation notes"
+    // doc). The checkbox, legend and drawing code below are all real
+    // and ready; they will simply start showing points once Pi 1
+    // starts calling log_obstacle().
+    const obstacleMapToggle = document.getElementById("obstacleMapToggle");
+    const obstacleLegend = document.getElementById("obstacleLegend");
+    const obstacleLegendNote = document.getElementById("obstacleLegendNote");
+    let obstacleMapEnabled = false;
+    let obstaclePoints = []; // [{{ts, side, distance_m, lat, lon, heading_deg}}, ...]
+    let obstaclePollBusy = false;
+
+    function drawObstaclePoints(project) {{
+      if (!obstacleMapEnabled || obstaclePoints.length === 0) return;
+      const tsValues = obstaclePoints.map((p) => p.ts);
+      const minTs = Math.min(...tsValues), maxTs = Math.max(...tsValues);
+      const span = (maxTs - minTs) || 1;
+
+      const group = document.createElementNS(MAP_NS, "g");
+      for (const point of obstaclePoints) {{
+        const [obsLat, obsLon] = destinationPoint(point.lat, point.lon, point.distance_m, point.heading_deg);
+        const [cx, cy] = project(obsLat, obsLon);
+        const size = 6;
+        const rect = document.createElementNS(MAP_NS, "rect");
+        rect.setAttribute("x", cx - size / 2);
+        rect.setAttribute("y", cy - size / 2);
+        rect.setAttribute("width", size);
+        rect.setAttribute("height", size);
+        rect.setAttribute("rx", 1);
+        rect.setAttribute("fill", "#000");
+        rect.setAttribute("stroke", "#1b1f24");
+        rect.setAttribute("stroke-width", "0.5");
+        // Recency cue within this batch -- newest point at full opacity,
+        // oldest at the floor below -- same "normalize to what's
+        // actually on screen" spirit as drawSolarCells()'s own min/max
+        // normalization above.
+        rect.setAttribute("opacity", (0.4 + 0.6 * (point.ts - minTs) / span).toFixed(2));
+        rect.style.cursor = "pointer";
+        rect.addEventListener("mouseenter", (evt) => showMapTooltip(evt, {{
+          label: `Obstacle (${{point.side}}) -- ${{point.distance_m.toFixed(2)}} m @ ${{point.heading_deg.toFixed(0)}}°`,
+          lat: obsLat,
+          lon: obsLon,
+          ts: point.ts,
+        }}));
+        rect.addEventListener("mousemove", positionMapTooltip);
+        rect.addEventListener("mouseleave", hideMapTooltip);
+        group.appendChild(rect);
+      }}
+      // Inserted BEFORE drawSolarCells() runs (see redrawMap() below) --
+      // that call's own insertBefore(..., firstChild) then pushes this
+      // group one slot forward, so obstacles paint on top of the solar
+      // overlay, both still behind every marker/line drawn earlier.
+      gpsMapSvg.insertBefore(group, gpsMapSvg.firstChild);
+    }}
+
+    function updateObstacleLegendNote() {{
+      if (!obstacleMapEnabled || obstaclePoints.length === 0) {{
+        obstacleLegend.hidden = true;
+        return;
+      }}
+      obstacleLegendNote.textContent =
+        `${{obstaclePoints.length}} point${{obstaclePoints.length === 1 ? "" : "s"}} -- darker = more recent`;
+      obstacleLegend.hidden = false;
+    }}
+
+    async function pollObstacleMap() {{
+      if (!obstacleMapEnabled || obstaclePollBusy) return;
+      obstaclePollBusy = true;
+      try {{
+        const res = await fetch("/api/obstacle_map");
+        const data = await res.json();
+        if (data.ok) {{
+          obstaclePoints = data.points || [];
+          updateObstacleLegendNote();
+          redrawMap();
+        }}
+      }} catch (err) {{
+        // Silent on failure, same spirit as pollSolarMap() above.
+      }} finally {{
+        obstaclePollBusy = false;
+      }}
+    }}
+
+    obstacleMapToggle.addEventListener("change", () => {{
+      obstacleMapEnabled = obstacleMapToggle.checked;
+      if (obstacleMapEnabled) {{
+        pollObstacleMap(); // immediate fetch, don't wait for the next interval tick
+      }} else {{
+        obstacleLegend.hidden = true;
+        redrawMap();
+      }}
+    }});
+    // Same 30s cadence as pollSolarMap() above, for the same reason --
+    // this only changes when Pi 1 actually logs a new echo (no fixed
+    // tick yet, see log_obstacle()'s docstring), and pollObstacleMap()
+    // is a no-op whenever the checkbox is off.
+    setInterval(pollObstacleMap, 30000);
+
     // ---- Waypoint-return / GPS-driving-route progress bar (2026-10-07) ----
     // Reuses haversineMeters/nmeaToDecimal/decodeLatLonList above and is
     // fed from pollMap()'s own GRT+STA fetches (no separate polling loop).
@@ -2183,9 +2460,13 @@ def _control_page(role="admin"):
         addMapCircle(x, y, p.radius, p);
       }}
 
-      // Inserted last but pushed to the very back of the <svg> (see its
-      // own comment) -- so the overlay never hides a waypoint/route
-      // line or a marker, only the plain grid background beneath them.
+      // Both inserted last but pushed to the very back of the <svg>
+      // (see each function's own comment) -- so neither overlay ever
+      // hides a waypoint/route line or a marker, only the plain grid
+      // background and each other. Obstacles first, solar last: the
+      // solar insertBefore() call runs second and so ends up furthest
+      // back, with obstacles painted on top of it.
+      drawObstaclePoints(project);
       drawSolarCells(project);
 
       drawMapScaleBar(invert);
@@ -2366,16 +2647,17 @@ def _control_page(role="admin"):
     // full protocol reference -- DRV, MOD, PID and STA are all still
     // valid sentences over the wire and typeable in the console below,
     // they just no longer get their own quick-fill button here, see the
-    // 2026-09-12 redesign notes there). Order matters: this is the order
-    // they're actually needed in, top to bottom -- set a target, arm
-    // driving to it, check the camera, and STOP always last/lowest so it
-    // never moves under a moving thumb.
+    // 2026-09-12 redesign notes there). Order matters, and is grouped
+    // deliberately (2026-10-18 reshuffle, explicit user request): driving
+    // commands first (set a target, arm driving to it), then camera
+    // commands, and STOP/Shutdown always last/lowest so they never move
+    // under a moving thumb.
     //
     // Most of these buttons never send anything by themselves -- clicking
     // just fills the console input with that sentence's beginning (type
     // plus a trailing comma) so the specific values can be typed in before
     // pressing Enter; the label shows a complete example of what to fill
-    // in. Three exceptions (action instead of prefix):
+    // in. The rest (action instead of prefix):
     // - "GPS Driving" (was "GPS route"): a route can be arbitrarily long,
     //   so there's no reasonable text to prefill -- it opens a file picker
     //   instead and sends a whole RTE sentence built from the file's
@@ -2387,7 +2669,20 @@ def _control_page(role="admin"):
     //   (current heading + the entered angle), and sends that point as a
     //   plain NAV -- no new sentence type needed, this just automates
     //   picking the NAV,lat,lon fields instead of typing them by hand.
-    //   Placed directly above STOP (second-to-last) at the user's request.
+    //   Grouped with the other driving buttons above, right under
+    //   "GPS Driving" (2026-10-18, was previously just above STOP).
+    // - "CAM,SNAP" and "CAM,REC_START"/"CAM,REC_STOP" (2026-10-18,
+    //   explicit user request): two direct-send buttons, replacing the
+    //   old single "CAM,SNAP" fill-then-Enter button. Both send the moment
+    //   they're clicked, same spirit as STOP/Shutdown below, but styled as
+    //   plain .cmd-button (not the red danger look) since neither is an
+    //   emergency action -- see the "snap"/"record" action branches below.
+    //   "Record" is a toggle: the first click sends CAM,REC_START and the
+    //   button stays visually engaged (red, pulsing dot, relabelled
+    //   "CAM,REC_STOP") until the second click sends CAM,REC_STOP and it
+    //   reverts -- purely a local UI toggle, it does not poll the robot
+    //   for whether a recording is already running (e.g. started from the
+    //   gamepad's BTN_B instead), since no sentence currently reports that.
     // - "STOP" (was "STP"): an emergency stop must not wait on a second
     //   keystroke -- clicking it sends STP immediately, no console step at
     //   all (see the "stop" action branch below).
@@ -2401,8 +2696,9 @@ def _control_page(role="admin"):
     const commandButtons = [
       {{label: "NAV,4723.492,N,00044.340,W",    prefix: "NAV,"}},
       {{label: "GPS Driving",                   action: "gpsRoute"}},
-      {{label: "CAM,SNAP",                      prefix: "CAM,"}},
       {{label: "Distance + angle",              action: "distanceAngle"}},
+      {{label: "CAM,SNAP",                      action: "snap"}},
+      {{label: "CAM,REC_START",                 action: "record"}},
       {{label: "STOP",                          action: "stop"}},
       {{label: "Shutdown Computer 1",           action: "shutdown"}},
     ];
@@ -2585,7 +2881,7 @@ def _control_page(role="admin"):
       distLabel.appendChild(distInput);
 
       const angleLabel = document.createElement("label");
-      angleLabel.textContent = "Angle (°, / cap actuel)";
+      angleLabel.textContent = "Angle (°, from current heading)";
       const angleInput = document.createElement("input");
       angleInput.type = "number";
       angleInput.step = "1";
@@ -2594,17 +2890,17 @@ def _control_page(role="admin"):
 
       const sendBtn = document.createElement("button");
       sendBtn.type = "button";
-      sendBtn.textContent = "Envoyer";
+      sendBtn.textContent = "Send";
 
       sendBtn.addEventListener("click", async () => {{
         const distance = parseFloat(distInput.value);
         const angle = parseFloat(angleInput.value);
         if (!Number.isFinite(distance) || distance <= 0) {{
-          logLine("Distance + angle: entrer une distance en mètres (&gt; 0)", "err");
+          logLine("Distance + angle: enter a distance in meters (&gt; 0)", "err");
           return;
         }}
         if (!Number.isFinite(angle)) {{
-          logLine("Distance + angle: entrer un angle de rotation en degrés", "err");
+          logLine("Distance + angle: enter a rotation angle in degrees", "err");
           return;
         }}
 
@@ -2614,14 +2910,14 @@ def _control_page(role="admin"):
         // position and heading right now, not a moment ago.
         const data = await sendToRobot("STA");
         if (!data.ok || !data.fields || data.fields.length < 14) {{
-          logLine("Distance + angle: impossible de lire la position actuelle du robot (STA a échoué)", "err");
+          logLine("Distance + angle: could not read the robot's current position (STA failed)", "err");
           return;
         }}
         const [lat, latDir, lon, lonDir, cap, speed] = data.fields;
         const curLat = nmeaToDecimal(lat, latDir);
         const curLon = nmeaToDecimal(lon, lonDir);
         if (curLat === null || (curLat === 0 && curLon === 0)) {{
-          logLine("Distance + angle: pas de position GPS sur le robot actuellement", "err");
+          logLine("Distance + angle: the robot has no GPS fix right now", "err");
           return;
         }}
 
@@ -2634,9 +2930,9 @@ def _control_page(role="admin"):
           // chosen design), but the user is warned so a target computed
           // from a meaningless heading isn't a silent surprise.
           logLine(
-            "Distance + angle: le robot est à l'arrêt, son cap (" +
+            "Distance + angle: the robot is stopped, its heading (" +
               heading.toFixed(0) +
-              "°) peut ne pas être fiable — la cible est calculée à partir de lui quand même",
+              "°) may not be reliable -- the target is still computed from it",
             "sys"
           );
         }}
@@ -2675,6 +2971,43 @@ def _control_page(role="admin"):
           controlsButtons.appendChild(btn);
           controlsButtons.appendChild(panel);
           continue;
+        }} else if (buttonDef.action === "snap") {{
+          // Direct send (2026-10-18, explicit user request): sends
+          // CAM,SNAP the moment this is clicked, same "no console step"
+          // spirit as STOP/Shutdown below, just not styled as an
+          // emergency action -- see the long comment above
+          // commandButtons.
+          btn.className = "cmd-button";
+          btn.title = "Immediately sends CAM,SNAP -- takes one photo now";
+          btn.addEventListener("click", () => sendCommand("CAM,SNAP"));
+        }} else if (buttonDef.action === "record") {{
+          // Direct-send toggle (2026-10-18, explicit user request): first
+          // click sends CAM,REC_START and the button stays visually
+          // engaged (red, pulsing dot, relabelled "CAM,REC_STOP") until
+          // the second click sends CAM,REC_STOP and it reverts -- a local
+          // UI toggle only, see the long comment above commandButtons for
+          // why it can't poll the robot's real recording state.
+          btn.className = "cmd-button cmd-button-record";
+          btn.title = "Toggles video recording -- sends CAM,REC_START, then CAM,REC_STOP on the next click";
+          const recDot = document.createElement("span");
+          recDot.className = "rec-dot";
+          const recLabel = document.createElement("span");
+          recLabel.textContent = buttonDef.label;
+          btn.textContent = "";
+          btn.appendChild(recDot);
+          btn.appendChild(recLabel);
+          let recording = false;
+          btn.addEventListener("click", () => {{
+            recording = !recording;
+            btn.classList.toggle("recording", recording);
+            if (recording) {{
+              recLabel.textContent = "CAM,REC_STOP";
+              sendCommand("CAM,REC_START");
+            }} else {{
+              recLabel.textContent = "CAM,REC_START";
+              sendCommand("CAM,REC_STOP");
+            }}
+          }});
         }} else if (buttonDef.action === "stop") {{
           // Emergency stop: sends STP the moment this is clicked, same as
           // pressing Enter on a typed "STP" would -- no console step, no
@@ -2953,6 +3286,7 @@ def _media_page(videos=None, images=None, role="admin"):
   <div class="nav">
     <a href="{url_for('control')}">Control</a>
     <a href="{url_for('power')}">Power</a>
+    <a href="{url_for('stats')}">Stats</a>
     <a href="{url_for('pages_index')}">Pages</a>
     <a href="{url_for('logout')}">Log out</a>
     {'<span class="viewer-badge">Read-only access</span>' if is_viewer else ''}
@@ -3248,6 +3582,56 @@ def api_solar_map():
     except PowerHistoryError as exc:
         return jsonify({"ok": False, "error": str(exc)}), 502
     return jsonify({"ok": True, "cells": cells})
+
+
+@app.route("/api/stats_summary")
+@login_required
+def api_stats_summary():
+    """Read-only, like /api/power_history above -- no role check needed.
+    One-shot summary (distance/exploration + energy/battery figures,
+    plus the ultrasonic front/rear detection counts) for pages/
+    stats.html -- see power_history_client.fetch_stats_summary() and
+    link/power_history.py's own fetch_stats_summary() for exactly what
+    each number means and which table it comes from."""
+    try:
+        summary = _fetch_stats_summary_with_fallback()
+    except PowerHistoryError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 502
+    return jsonify({"ok": True, "summary": summary})
+
+
+@app.route("/api/obstacle_map")
+@login_required
+def api_obstacle_map():
+    """Read-only, like /api/solar_map above -- no role check needed.
+    fetch_obstacle_points() loops over Pi #1's paginated OBS response
+    and returns the assembled raw readings (robot position + distance +
+    heading, NOT a pre-projected obstacle position -- see link/
+    power_history.py's _OBSTACLE_SCHEMA comment) as JSON, for
+    /control's "Obstacle map (ultrasonic)" layer (2026-10-18) to
+    project and draw. Legitimately {{"ok": true, "points": []}} until
+    the ultrasonic sensors exist -- that is not an error."""
+    try:
+        points = _fetch_obstacle_points_with_fallback()
+    except PowerHistoryError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 502
+    return jsonify({"ok": True, "points": points})
+
+
+@app.route("/stats")
+@login_required
+def stats():
+    """Dedicated distance/energy/ultrasonic statistics page
+    (pages/stats.html, 2026-10-18): polls /api/stats_summary for the
+    figures that are computable today (distance & exploration, energy &
+    battery, ultrasonic front/rear counts) and shows the remaining
+    sections (GPS fix quality, manual/auto drive-mode ratio, LoRa byte
+    counters) as explicit "not available yet" placeholders -- see the
+    "Pi 1 implementation notes" doc for what each one is waiting on.
+    Served as a static file straight from pages/, same reasoning as the
+    power() route above (all of its state comes from client-side
+    polling)."""
+    return send_from_directory(PAGES_DIR, "stats.html")
 
 
 @app.route("/media/camera")

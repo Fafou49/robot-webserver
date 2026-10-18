@@ -48,6 +48,26 @@ class PowerHistoryError(RuntimeError):
 SOLAR_MAP_FIELD_ORDER = ("lat", "lon", "avg_pv_power", "sample_count", "last_ts")
 SOLAR_MAP_ROW_SIZE = len(SOLAR_MAP_FIELD_ORDER)
 
+# Must match link/server.py's STS sentence field order exactly (same
+# hand-kept-in-sync convention as above) -- see
+# link/power_history.py's fetch_stats_summary() for what each figure
+# means. All numeric; obstacle_front_count/obstacle_rear_count are
+# integers, the rest are floats.
+STATS_SUMMARY_FIELD_ORDER = (
+    "total_distance_m", "avg_speed_moving_mps", "best_daily_distance_m",
+    "solar_harvested_kwh", "energy_consumed_kwh",
+    "best_solar_day_kwh", "worst_solar_day_kwh",
+    "obstacle_front_count", "obstacle_rear_count",
+)
+
+# Must match link/power_history.py's obstacle_log column order exactly
+# (same hand-kept-in-sync convention as FIELD_ORDER above) -- how a
+# flat row of OBS fields gets decoded back into named values. Unlike
+# the other *_FIELD_ORDER tuples above, `side` is a string ("front"/
+# "rear"), not a number -- see fetch_obstacle_points() below.
+OBSTACLE_FIELD_ORDER = ("ts", "side", "distance_m", "lat", "lon", "heading_deg")
+OBSTACLE_ROW_SIZE = len(OBSTACLE_FIELD_ORDER)
+
 
 def fetch_power_history(period: str, host: str, port: int, timeout: float = 5.0) -> list:
     """Returns every logged sample in the rolling `period` window
@@ -143,3 +163,81 @@ def fetch_solar_map(host: str, port: int, timeout: float = 5.0) -> list:
             return rows
 
     raise PowerHistoryError("SMP_TOO_MANY_PAGES")
+
+
+def fetch_stats_summary(host: str, port: int, timeout: float = 5.0) -> dict:
+    """Returns the one-shot /stats summary dict (see link/server.py's STS
+    sentence and link/power_history.py's fetch_stats_summary() for what
+    each figure means), keyed by STATS_SUMMARY_FIELD_ORDER. No
+    pagination -- this is a handful of numbers, not a row set, unlike
+    fetch_power_history()/fetch_solar_map()/fetch_obstacle_points()
+    above/below. Raises PowerHistoryError on any failure, same as every
+    other fetch_* function here."""
+    result = send_command("STS", host, port, timeout=timeout)
+    if not result["ok"]:
+        raise PowerHistoryError(result.get("error", "STS_FAILED"))
+
+    fields = result.get("fields") or []
+    if len(fields) != len(STATS_SUMMARY_FIELD_ORDER):
+        raise PowerHistoryError(f"STS_MALFORMED_RESPONSE:{fields}")
+
+    try:
+        summary = dict(zip(STATS_SUMMARY_FIELD_ORDER, (float(value) for value in fields)))
+    except ValueError:
+        raise PowerHistoryError(f"STS_MALFORMED_RESPONSE:{fields}")
+    summary["obstacle_front_count"] = int(summary["obstacle_front_count"])
+    summary["obstacle_rear_count"] = int(summary["obstacle_rear_count"])
+    return summary
+
+
+def fetch_obstacle_points(host: str, port: int, timeout: float = 5.0) -> list:
+    """Returns every logged ultrasonic-obstacle reading currently known
+    to Pi #1 (see link/server.py's OBS sentence and
+    link/power_history.py's obstacle_log table/fetch_obstacle_chunk()),
+    as a list of dicts keyed by OBSTACLE_FIELD_ORDER. Same pagination-
+    loop shape as fetch_solar_map() above. Legitimately returns an empty
+    list until the ultrasonic sensors exist and start logging -- see
+    link/power_history.py's log_obstacle() docstring -- callers should
+    treat that as "no data yet", not as an error.
+
+    `side` stays a plain string ("front"/"rear") -- unlike every other
+    field here it is NOT run through float(), since it isn't numeric on
+    the wire (same free-text-field shape as HIS's own `period`
+    argument)."""
+    rows = []
+    offset = 0
+    for _ in range(MAX_PAGES):
+        result = send_command(f"OBS,{offset}", host, port, timeout=timeout)
+        if not result["ok"]:
+            raise PowerHistoryError(result.get("error", "OBS_FAILED"))
+
+        fields = result.get("fields") or []
+        if len(fields) < 3:
+            raise PowerHistoryError(f"OBS_MALFORMED_RESPONSE:{fields}")
+
+        try:
+            total_count = int(fields[0])
+            resp_offset = int(fields[1])
+            returned_count = int(fields[2])
+        except ValueError:
+            raise PowerHistoryError(f"OBS_MALFORMED_RESPONSE:{fields}")
+
+        row_fields = fields[3:]
+        if len(row_fields) != returned_count * OBSTACLE_ROW_SIZE:
+            raise PowerHistoryError("OBS_FIELD_COUNT_MISMATCH")
+
+        for i in range(returned_count):
+            raw = row_fields[i * OBSTACLE_ROW_SIZE:(i + 1) * OBSTACLE_ROW_SIZE]
+            row = dict(zip(OBSTACLE_FIELD_ORDER, raw))
+            row["ts"] = int(row["ts"])
+            row["distance_m"] = float(row["distance_m"])
+            row["lat"] = float(row["lat"])
+            row["lon"] = float(row["lon"])
+            row["heading_deg"] = float(row["heading_deg"])
+            rows.append(row)
+
+        offset = resp_offset + returned_count
+        if returned_count == 0 or offset >= total_count:
+            return rows
+
+    raise PowerHistoryError("OBS_TOO_MANY_PAGES")
