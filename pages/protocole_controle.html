@@ -18,6 +18,16 @@
     --tag-req-ink: #1f4e79;
     --tag-res-bg: #e9f2e7;
     --tag-res-ink: #2f6b32;
+    /* LoRa radio-budget diagram/chart colors (2026-10-24) -- a fixed
+       categorical order (DGPS corrections, image chunks, protocol
+       replies), validated with the dataviz skill's validate_palette.js
+       against this page's own light surface (#fcfcfb-ish, close enough
+       to --bg/--surface here) -- all six checks pass. --chart-idle is
+       just "unused budget", not a fourth identity color, so it reuses
+       the existing neutral --line instead of a validated hue. */
+    --chart-dgps: #a13d2e;
+    --chart-img: #3a6ea5;
+    --chart-reply: #2f8f4e;
   }
   @media (prefers-color-scheme: dark) {
     :root {
@@ -33,6 +43,12 @@
       --tag-req-ink: #8fc2ef;
       --tag-res-bg: #182619;
       --tag-res-ink: #9bd39e;
+      /* Same three identities, re-stepped for this dark surface
+         (#1c1a16) and re-validated (not an automatic flip of the light
+         values -- see dataviz skill) -- all six checks pass here too. */
+      --chart-dgps: #d9735c;
+      --chart-img: #4f94cf;
+      --chart-reply: #45a164;
     }
   }
 
@@ -98,6 +114,65 @@
     white-space: pre;
   }
   .sentence-diagram .lbl { color: var(--accent); }
+
+  /* LoRa architecture diagram (2026-10-24) -- plain inline SVG, themed
+     with this page's own custom properties so it already follows
+     light/dark mode without a separate dark-mode image. */
+  .diagram-figure {
+    margin: 16px 0;
+    padding: 14px 16px;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+  }
+  .diagram-figure svg { display: block; width: 100%; height: auto; }
+  .diagram-figure figcaption {
+    margin-top: 10px;
+    font-size: 12.5px;
+    color: var(--muted);
+    font-style: italic;
+  }
+
+  /* Radio-budget pie chart (2026-10-24) -- see the dataviz skill's
+     validated palette above (--chart-dgps/--chart-img/--chart-reply).
+     Legend sits beside the chart on wide screens, stacks under it on
+     narrow ones -- identity is always in the legend text too, never
+     color alone. */
+  .pie-figure {
+    margin: 16px 0;
+    padding: 16px 18px;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 24px;
+  }
+  .pie-figure svg { width: 180px; height: 180px; flex: 0 0 auto; }
+  .pie-legend { list-style: none; margin: 0; padding: 0; flex: 1 1 220px; min-width: 220px; }
+  .pie-legend li {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    margin: 7px 0;
+    font-size: 14px;
+  }
+  .pie-legend .swatch {
+    flex: 0 0 auto;
+    width: 11px;
+    height: 11px;
+    border-radius: 3px;
+    margin-top: 3px;
+  }
+  .pie-legend .pct { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: var(--muted); font-size: 12.5px; }
+  .pie-figure figcaption {
+    flex: 1 1 100%;
+    margin-top: 2px;
+    font-size: 12.5px;
+    color: var(--muted);
+    font-style: italic;
+  }
 
   ul.notes { padding-left: 20px; }
   ul.notes li { margin: 6px 0; }
@@ -169,7 +244,7 @@
 
   <header>
     <a class="back-link" href="/control">&larr; Back to the control page</a>
-    <div class="status">Transport implemented (TCP socket) &mdash; completed incrementally</div>
+    <div class="status">Transport implemented (TCP socket + LoRa radio) &mdash; completed incrementally</div>
     <h1>Robot Control Protocol</h1>
     <p class="subtitle">Format of the messages exchanged between the website (Raspberry Pi #2) and the robot (Raspberry Pi #1). This page is updated whenever a new command is defined.</p>
   </header>
@@ -203,6 +278,154 @@
       Frames travel over a simple TCP connection between the two boards (Python's standard <code>socket</code> module, no external dependency) &mdash; chosen over MQTT (an extra broker to manage, overkill for 2 nodes) or plain HTTP (less suited to continuous telemetry). The robot (Pi #1) runs a TCP server (<code>link/server.py</code> in the robot repo, port <code>5050</code> by default) that accepts one frame per line and replies with an <code>ACK</code>/<code>ERR</code>/<code>STA</code> frame. The site (Pi #2) opens a connection, sends, reads one response line, closes &mdash; enough for commands typed by hand in the <code>/control</code> console.
     </p>
     <p class="mono" style="color: var(--muted); font-style: italic;">Current status&nbsp;: STP and DRV update an in-memory state and respond correctly (ACK/ERR), but do not yet drive the real motors &mdash; motor_control/pwm.py is currently a blocking script that opens the GPIO at startup, not a callable function; actually wiring it up for real is the next step. NAV and PID record the received value (ACK) without acting on it yet (no link to the GPS/PID pipeline for now). RTE genuinely stores the waypoint list and genuinely advances target_lat/target_lon to the next one as the live GPS fix reaches each one in turn (same real logic as NAV's target, just chained automatically) &mdash; but, same caveat as NAV, nothing yet steers the motors to actually follow it. CAM,SNAP genuinely calls the GET /snap route of camera/stream_server.py (over local HTTP, separate process) and responds ACK/ERR depending on the result; CAM,REC_START and CAM,REC_STOP always respond ERR (video recording not implemented). In the STA response, the <em>current</em> position and cap/speed are genuinely read from a serial GPS receiver (link/gps_reader.py, untested on a real receiver &mdash; pynmea2/pyserial could not be installed in the environment where this module was written) and stay at 0 as long as no receiver is connected; the <em>target</em> position (target_lat/target_lon), however, does reflect the last NAV frame received, or the current waypoint of an active RTE route.</p>
+  </section>
+
+  <section>
+    <h2>Transport #2&nbsp;: LoRa radio link (added 2026-10-24)</h2>
+    <p>
+      A second, independent transport for the exact same sentences above: an E22-900T22U LoRa module, one per Pi, wired over USB-serial and run in &quot;transparent transmission&quot; mode &mdash; once its air frequency / network address / air data rate are configured once (a one-time step with the module's own AT-command or config-GUI tool), the two modules behave like a slow, lossy serial cable between the boards. Because it's just another byte pipe carrying the <em>same</em> <code>$PROV,...*hh</code> sentences through the <em>same</em> dispatch table (<code>link/server.py</code>'s <code>_handle_sentence()</code>, shared verbatim by both transports), every sentence type documented on this page already works over LoRa with zero changes &mdash; nothing above this section is LoRa-specific.
+    </p>
+    <p>
+      Why add it at all: WiFi has a hard range limit, and this robot operates outdoors, away from any access point, by design. <code>app.py</code>'s <code>_send_command_with_fallback()</code> tries the radio link first for ordinary console commands, falling back to WiFi/TCP automatically &mdash; a deliberate &quot;keep both up while the radio link is being tuned&quot; choice, not a hard cutover. The one exception is the new DGPS correction relay below, which does the opposite (WiFi first, LoRa only as a fallback) for its own reasons &mdash; see that section.
+    </p>
+
+    <div class="diagram-figure">
+      <svg viewBox="0 0 700 235" role="img" aria-label="Diagram: Pi #2 and Pi #1 connected by both a WiFi/TCP link and a LoRa radio link; DGPS corrections, protocol replies, and image chunks all share the LoRa link">
+        <defs>
+          <marker id="arrowEnd" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M0,0 L10,5 L0,10 Z" fill="var(--muted)"></path>
+          </marker>
+        </defs>
+        <style>
+          text { font-family: Georgia, "Times New Roman", serif; fill: var(--ink); }
+          .diagram-small { font-size: 12.5px; fill: var(--muted); }
+          .diagram-box-label { font-size: 14px; font-weight: 600; }
+          .diagram-box-sub { font-size: 11.5px; fill: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+        </style>
+
+        <rect x="20" y="24" width="200" height="60" rx="8" fill="var(--code-bg)" stroke="var(--line)"></rect>
+        <text x="120" y="50" text-anchor="middle" class="diagram-box-label">Pi #2</text>
+        <text x="120" y="68" text-anchor="middle" class="diagram-box-sub">robot-webserver</text>
+
+        <rect x="480" y="24" width="200" height="60" rx="8" fill="var(--code-bg)" stroke="var(--line)"></rect>
+        <text x="580" y="50" text-anchor="middle" class="diagram-box-label">Pi #1</text>
+        <text x="580" y="68" text-anchor="middle" class="diagram-box-sub">link/server.py</text>
+
+        <line x1="222" y1="46" x2="478" y2="46" stroke="var(--ink)" stroke-width="1.6" marker-end="url(#arrowEnd)" marker-start="url(#arrowEnd)"></line>
+        <text x="350" y="36" text-anchor="middle" class="diagram-small">WiFi / TCP :5050</text>
+
+        <line x1="222" y1="100" x2="478" y2="100" stroke="var(--ink)" stroke-width="1.6" stroke-dasharray="7,5" marker-end="url(#arrowEnd)" marker-start="url(#arrowEnd)"></line>
+        <text x="350" y="90" text-anchor="middle" class="diagram-small">LoRa radio &mdash; ~1200&nbsp;B/s budget (9.6&nbsp;kbps)</text>
+
+        <line x1="350" y1="106" x2="350" y2="122" stroke="var(--line)" stroke-width="1.2" marker-end="url(#arrowEnd)"></line>
+
+        <rect x="40" y="124" width="620" height="94" rx="8" fill="var(--code-bg)" stroke="var(--line)"></rect>
+
+        <rect x="58" y="138" width="11" height="11" rx="2" fill="var(--chart-dgps)"></rect>
+        <text x="76" y="148" class="diagram-small">COR &mdash; DGPS corrections, 1/s, <tspan font-style="italic">never throttled</tspan></text>
+
+        <rect x="58" y="164" width="11" height="11" rx="2" fill="var(--chart-reply)"></rect>
+        <text x="76" y="174" class="diagram-small">ACK / ERR / STA / IMGACK / IMGNAK &mdash; replies, <tspan font-style="italic">never throttled</tspan></text>
+
+        <rect x="58" y="190" width="11" height="11" rx="2" fill="var(--chart-img)"></rect>
+        <text x="76" y="200" class="diagram-small">Binary image chunks &mdash; automatic snap, <tspan font-style="italic">only with leftover budget</tspan></text>
+      </svg>
+      <figcaption>Both transports carry the same <code>$PROV,...*hh</code> sentences through the same dispatch table. Three kinds of traffic share the single LoRa link: DGPS corrections and protocol replies are always sent immediately; image chunks only go out with whatever budget is left over.</figcaption>
+    </div>
+
+    <p>
+      <strong>UART baud rate vs. air data rate &mdash; not the same number.</strong> <code>LORA_BAUD_RATE</code> (9600 by default) is only the speed between the Pi's USB port and the module itself &mdash; raising it does <em>not</em> extend range or increase how fast bytes actually cross the air. The module's own <em>air data rate</em> (configured separately, in the module's own config mode) is what the air actually carries, and it's a direct range/speed trade-off: a lower air rate reaches further for the same transmit power. <code>LORA_AIR_RATE_BYTES_PER_S</code> on Pi&nbsp;#1 must always be kept in sync with whatever the module is actually set to (air rate in kbps &times; 1000 &divide; 8) &mdash; it's what the budget below is built around, and a mismatch either throttles the robot below what the link could really carry, or lets it push more than the link can carry, garbling traffic.
+    </p>
+    <p class="mono" style="color: var(--muted); font-style: italic;">
+      Field finding, 2026-10-24: at the module's 2.4&nbsp;kbps factory default (&asymp;300&nbsp;B/s), the DGPS correction relay alone was already saturating the link, leaving no room for ordinary telemetry commands &mdash; not just the automatic image fallback. Both Pi's dongles are accordingly being raised to <strong>9.6&nbsp;kbps</strong> (&asymp;1200&nbsp;B/s, &times;4) and their UART speed to 19200 (so the Pi&lrm;&harr;dongle USB-serial link isn't itself the new bottleneck &mdash; at 9600 baud it caps out around 960&nbsp;B/s, just under the new 1200&nbsp;B/s air rate), accepting shorter range in exchange. See <code>tools/lora_configure.py</code> (present in both repos) for the reconfiguration procedure &mdash; it talks to the module's own configuration registers directly over the same USB-serial port (the module has no GPIO M0/M1 pins on this USB dongle variant; its configuration mode is entered with a physical side button, not from software). Update <code>LORA_BAUD_RATE</code> on both Pis and <code>LORA_AIR_RATE_BYTES_PER_S</code> on Pi&nbsp;#1 (see each repo's <code>.env.example</code>) to match once both dongles are confirmed reconfigured.
+    </p>
+    <p>
+      <strong>Two frame kinds share one wire.</strong> The text sentences on this page ($PROV,...*hh\r\n) and a new compact binary framing for image chunks (<code>link/binary_frame.py</code>, identical module copied into both repos) coexist on the exact same serial stream. A reader distinguishes them with a single peeked byte: every binary frame starts with a fixed <code>MAGIC</code> byte (<code>0xA5</code>), which can never be mistaken for <code>$</code> (<code>0x24</code>), the first byte of every text sentence &mdash; so one cheap check is enough to dispatch each incoming unit to the right parser, no ambiguity possible. Each binary frame's 13-byte header (magic, type, image id, sequence number, total chunk count, payload length, CRC32) is self-describing, so a chunk can be decoded (or recognized as corrupted, via its own CRC32) independently of any other.
+    </p>
+  </section>
+
+  <section>
+    <h2>LoRa radio budget &amp; priority &mdash; &quot;DGPS always wins&quot;</h2>
+    <p>
+      Whatever the module's air capacity actually is (<code>LORA_AIR_RATE_BYTES_PER_S</code>, see above &mdash; 300&nbsp;B/s at the module's 2.4&nbsp;kbps factory default, 1200&nbsp;B/s at the 9.6&nbsp;kbps both dongles are being raised to as of 2026-10-24), it's shared by everything riding the LoRa link, and real-world multi-constellation RTCM correction streams (what the DGPS relay below carries) have been measured at roughly <strong>290&ndash;560&nbsp;bytes/second</strong> on their own &mdash; comparable to, and sometimes already bigger than, the <em>old</em> 300&nbsp;B/s channel (this is exactly the saturation the 2026-10-24 field finding above was about), but a comfortably smaller fraction of the new 1200&nbsp;B/s one. Explicit decision (2026-10-24, asked and confirmed): when DGPS corrections and an in-progress image transmission would otherwise compete for the same saturated channel, <strong>DGPS corrections always win</strong>, whatever the current air rate. Image transmission is allowed to be slow, stall, or make no progress for a while when the channel is busy &mdash; that's the accepted, intentional consequence, not a bug &mdash; the air rate increase makes it less likely to happen often, not impossible.
+    </p>
+    <p>
+      The mechanism is a simple token bucket (<code>LoraLinkBudget</code> in <code>link/lora_image_streamer.py</code>, refilled continuously at the air rate above, drawn down by every byte either Pi actually writes to the port). DGPS correction sentences (<code>COR</code>) and every protocol reply (<code>ACK</code>/<code>ERR</code>/<code>STA</code>/...) are written immediately, unconditionally &mdash; never checked against the bucket first. Only an automatic image chunk is explicitly gated: it's only sent if the bucket currently holds enough bytes for it, and simply waits for the next opportunity otherwise. The priority falls out of that asymmetry by construction, with no explicit &quot;if DGPS is active, pause images&quot; coupling needed anywhere in the code.
+    </p>
+
+    <div class="pie-figure">
+      <svg viewBox="0 0 180 180" role="img" aria-label="Pie chart: illustrative split of one second of LoRa airtime at the 9.6 kbps air rate, 30% DGPS corrections, 68% image chunks, 2% protocol replies">
+        <path d="M 90,90 L 90.00,10.00 A 80,80 0 0 1 166.08,114.72 Z" fill="var(--chart-dgps)" stroke="var(--surface)" stroke-width="2"></path>
+        <path d="M 90,90 L 166.08,114.72 A 80,80 0 1 1 79.97,10.63 Z" fill="var(--chart-img)" stroke="var(--surface)" stroke-width="2"></path>
+        <path d="M 90,90 L 79.97,10.63 A 80,80 0 0 1 90.00,10.00 Z" fill="var(--chart-reply)" stroke="var(--surface)" stroke-width="2"></path>
+      </svg>
+      <ul class="pie-legend">
+        <li><span class="swatch" style="background: var(--chart-dgps);"></span>DGPS corrections (COR) <span class="pct">~30% &middot; ~350&nbsp;B/s</span></li>
+        <li><span class="swatch" style="background: var(--chart-img);"></span>Automatic image chunks <span class="pct">~68% &middot; ~830&nbsp;B/s</span></li>
+        <li><span class="swatch" style="background: var(--chart-reply);"></span>Protocol replies / ACKs <span class="pct">~2% &middot; ~20&nbsp;B/s</span></li>
+      </ul>
+      <figcaption>Illustrative split of one second of LoRa airtime at the new 9.6&nbsp;kbps / ~1200&nbsp;B/s air rate (2026-10-24), once both the DGPS relay and the automatic image fallback are active &mdash; not a fixed quota: DGPS corrections and replies are never rationed, images simply get whatever is left. Still not guaranteed: a heavier correction burst (measured up to ~560&nbsp;B/s) narrows the image slice, and at the <em>old</em> 2.4&nbsp;kbps / 300&nbsp;B/s rate a typical correction stream alone could already take 100% of the chart, leaving image chunks at 0% &mdash; the saturation that motivated this change.</figcaption>
+    </div>
+  </section>
+
+  <section>
+    <h2>DGPS correction relay (<code>COR</code>, added 2026-10-24)</h2>
+    <p>
+      Pi&nbsp;#1 used to fetch its own DGPS/RTK corrections directly from an NTRIP caster (<code>gps/dgps_transfer.py</code>, now retired) &mdash; which silently produced nothing whenever Pi&nbsp;#1 itself had no internet on site, exactly the situation the LoRa link exists for. Corrections are now fetched by Pi&nbsp;#2 instead (<code>dgps_relay.py</code>, robot-webserver repo &mdash; it has the reliable connection) and relayed to Pi&nbsp;#1 as a new <code>COR</code> sentence, <strong>one base64-encoded batch per second</strong>. Pi&nbsp;#1 writes the decoded bytes straight to the GPS receiver's own serial port (<code>link/dgps_injector.py</code>) and reports back how many bytes actually got written.
+    </p>
+    <p>
+      Transport choice for <code>COR</code> is the opposite of ordinary commands: <strong>WiFi is tried first</strong>, LoRa only once every WiFi candidate has failed to even connect. Corrections don't need the scarce radio budget at all when WiFi can carry them for free, so this keeps that budget available for the image fallback below &mdash; LoRa only has to carry corrections during exactly the scenario this whole feature is for (Pi&nbsp;#1 out of WiFi range). A batch too big for one sentence (a real burst can run bigger than comfortable) is simply split across several <code>COR</code> sentences rather than ever being truncated.
+    </p>
+    <p>No encryption on this relay for now (explicit decision, 2026-10-24) &mdash; see the note at the end of this page.</p>
+  </section>
+
+  <section>
+    <h2>Automatic camera snapshot over LoRa (added 2026-10-24)</h2>
+    <p>
+      While Pi&nbsp;#1 has no WiFi reachable <em>and</em> the robot is actively driving (mode <code>MANUAL</code> or <code>AUTO</code> &mdash; never while <code>IDLE</code>), it repeatedly grabs a small image from the camera, transmits it over LoRa, and loops: capture &rarr; transmit &rarr; display whatever has arrived so far &rarr; once complete, hold the finished image on screen for 3&nbsp;seconds &rarr; capture again. Shown live on both <code>/control</code>'s Camera panel and <code>/media</code>'s Video feed panel on the website, with an explicit &quot;receiving.../transfer complete&quot; badge.
+    </p>
+    <p>
+      Inspired by how deep-space probes stream pictures home over a far slower, far less reliable link than this one (NASA's Deep Space Network / ESA's Estrack): images are encoded as <strong>progressive JPEG</strong>, so a still-incomplete transfer already renders a usable (just blurrier) picture instead of nothing at all &mdash; the same idea as the ICER compression used on Mars rovers. Missing chunks are tracked by Pi&nbsp;#2 and recovered with <strong>selective retransmission</strong> (an <code>IMGNAK</code> listing exactly which chunk numbers are still missing, inspired by CCSDS CFDP's file-transfer protocol for deep-space links) &mdash; never the whole image resent for one bad chunk. Pi&nbsp;#2 sends a single <code>IMGACK</code> once it has every chunk, letting Pi&nbsp;#1 move straight to the 3-second hold instead of waiting out a timeout for nothing.
+    </p>
+    <p>
+      Deliberately kept separate from the robot's own photos: this automatic snap is captured through its own endpoint (<code>GET /snap_transient</code> on <code>camera/stream_server.py</code>, small &mdash; 160&times;120, grayscale, quality 40 by default &mdash; to fit this link's budget), is <em>never</em> written to Pi&nbsp;#1's capped snapshot store, and never counts as (or pushes out) a user-requested <code>CAM,SNAP</code>. No encryption on this link for now either &mdash; see the note below.
+    </p>
+    <table>
+      <caption>New sentences added alongside this work (2026-10-24) &mdash; travel over whichever transport is currently in use (WiFi/TCP or LoRa, same shared dispatch table as every other sentence on this page); same REQ/RES convention.</caption>
+      <thead>
+        <tr>
+          <th>Type</th>
+          <th>Direction</th>
+          <th>Fields</th>
+          <th>Description</th>
+          <th>Example</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>COR</code></td>
+          <td><span class="dir req">REQ</span></td>
+          <td>base64_rtcm_bytes</td>
+          <td>One base64-encoded batch of DGPS/RTCM correction bytes, relayed by Pi&nbsp;#2's <code>dgps_relay.py</code> roughly once per second (see above). Pi&nbsp;#1 writes the decoded bytes to the GPS receiver's serial port and replies with how many bytes it actually managed to write (<code>0</code> if no receiver is connected right now &mdash; best-effort, like every other optional-hardware integration in this protocol, never an error by itself). <code>ERR,30</code> (<code>COR_NEEDS_1_FIELD</code>) / <code>ERR,31</code> (<code>COR_BAD_BASE64</code>) on a malformed request.</td>
+          <td class="example">$PROV,COR,aGVsbG8=*66<br>&rarr; $PROV,ACK,COR,17*26</td>
+        </tr>
+        <tr>
+          <td><code>IMGNAK</code></td>
+          <td><span class="dir req">REQ</span></td>
+          <td>image_id, total_chunks, missing_bitmask_hex</td>
+          <td>Pi&nbsp;#2 &rarr; Pi&nbsp;#1: &quot;of image <code>image_id</code>'s <code>total_chunks</code> chunks, I'm still missing the ones flagged in this hex bitmask&quot; (bit <em>i</em> set = chunk <em>i</em> missing). Queues exactly those chunks for retransmission on Pi&nbsp;#1's side (<code>LoraImageStreamer.handle_nak()</code>); a NAK for an image Pi&nbsp;#1 has already moved on from is silently ignored. <code>ERR,32</code>/<code>ERR,33</code> on a malformed request.</td>
+          <td class="example">$PROV,IMGNAK,7,4,5*2A <em>(chunks 0 and 2 of 4 still missing)</em><br>&rarr; $PROV,ACK,IMGNAK*55</td>
+        </tr>
+        <tr>
+          <td><code>IMGACK</code></td>
+          <td><span class="dir req">REQ</span></td>
+          <td>image_id</td>
+          <td>Pi&nbsp;#2 &rarr; Pi&nbsp;#1: &quot;I have every chunk of image <code>image_id</code>&quot; &mdash; skips straight to the post-completion hold instead of waiting out the usual no-NAK timeout for nothing. <code>ERR,34</code>/<code>ERR,35</code> on a malformed request.</td>
+          <td class="example">$PROV,IMGACK,7*26<br>&rarr; $PROV,ACK,IMGACK*58</td>
+        </tr>
+      </tbody>
+    </table>
+    <p class="mono" style="color: var(--muted); font-style: italic;">The image bytes themselves never travel as a text sentence &mdash; only this feedback does. Each chunk rides the separate binary frame format described above (<code>link/binary_frame.py</code>), not <code>$PROV,...</code> text, so it isn't in this table.</p>
   </section>
 
   <section>
@@ -372,7 +595,7 @@
           <td class="example">$PROV,ERR,02,PWM_OUT_OF_RANGE*7D</td>
         </tr>
         <tr class="todo-row">
-          <td colspan="5">To be defined later: reporting DGPS/RTK connection status, frame authentication code if the network becomes less reliable.</td>
+          <td colspan="5">DGPS correction relay is now defined (see <code>COR</code>, &quot;DGPS correction relay&quot; section above). Still to be defined: frame authentication/encryption for the LoRa link (see &quot;A note on security&quot; at the end of this page).</td>
         </tr>
       </tbody>
     </table>
@@ -389,6 +612,13 @@
 
 # sentence_body = everything between $ and * (exclusive)
 # e.g.: nmea_checksum("PROV,STP") -> "60"</div>
+  </section>
+
+  <section>
+    <h2>A note on security (LoRa link, as of 2026-10-24)</h2>
+    <p>
+      Nothing on the LoRa link is encrypted yet &mdash; explicit decision for this first pass (&quot;dans un premier temps on n'encrypte pas&quot;): not the text sentences, not the DGPS correction payloads, not the image chunks. The E22 module's own hardware KEY-register scrambling was evaluated and deliberately set aside (a 16-bit keyspace, a proprietary/unaudited algorithm, no replay protection &mdash; weak enough that it wouldn't meaningfully raise the bar). A software layer (e.g. AES-GCM/ChaCha20-Poly1305 over each sentence/chunk) remains the planned next step once this first unencrypted version has been exercised in the field; see the &quot;to be defined later&quot; row in the sentence table above.
+    </p>
   </section>
 
   <footer>

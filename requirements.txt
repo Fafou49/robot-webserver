@@ -1,3 +1,13 @@
 flask
 python-dotenv
 requests
+pyserial  # lora_link.py (E22-900T22U radio link) -- only actually imported
+          # when LORA_ENABLED=1 in .env, so the app runs fine without it
+          # installed while that's off (the default)
+pygnssutils  # dgps_relay.py's NTRIP client (2026-10-24) -- fetches RTCM
+             # DGPS corrections and relays them to Pi #1, 1 batch/sec,
+             # over WiFi normally or LoRa once that's down. Only actually
+             # imported when DGPS_RELAY_ENABLED=1 in .env (the default),
+             # deferred inside dgps_relay._start_ntrip_client() so the
+             # app still runs fine without it installed if that's turned
+             # off (e.g. no NTRIP credentials at hand yet)

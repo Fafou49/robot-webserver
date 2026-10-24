@@ -19,11 +19,28 @@ plain sockets -- see robot_link.py and pages/protocole_controle.html for
 the NMEA-style sentence format.
 """
 import functools
+import logging
 import os
 import secrets
 
-import requests
 from dotenv import load_dotenv
+
+# Must run before any of this project's own modules are imported below --
+# 2026-10-24 bug (found live): lora_link.py reads LORA_ENABLED/
+# LORA_SERIAL_PORT/LORA_BAUD_RATE from os.environ at IMPORT time (module-
+# level statements), not lazily per call. `import lora_link` used to sit
+# above this load_dotenv() call, so os.environ never had .env's values in
+# it yet when lora_link's own module-level `os.environ.get("LORA_ENABLED",
+# "0")` ran -- it permanently baked in "disabled", no matter what .env
+# said, and every later call silently fell through to the WiFi/TCP path
+# with zero visible error (lora_link.LORA_ENABLED is a plain module
+# constant, read once). A plain `python3 -c "..."` test script that
+# happened to call load_dotenv() before its own `import lora_link` never
+# hit this, which is exactly what made it look WiFi-only only inside the
+# real app.
+load_dotenv()
+
+import requests
 from flask import Flask, Response, abort, jsonify, redirect, request, send_from_directory, session, url_for
 from werkzeug.security import check_password_hash
 
@@ -34,10 +51,14 @@ from power_history_client import (
     fetch_solar_map,
     fetch_stats_summary,
 )
+import dgps_relay
+import lora_link
+from link_bytes import get_bytes_sent_since_boot
 from robot_host import RobotHostResolver
 from robot_link import send_command
 
-load_dotenv()
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+log = logging.getLogger("app")
 
 PAGES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pages")
 MEDIA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "media")
@@ -74,6 +95,15 @@ ROBOT_HOST_CANDIDATES = [
 ]
 ROBOT_PORT = int(os.environ.get("ROBOT_PORT", "5050"))
 ROBOT_CONTROL_RESOLVER = RobotHostResolver(ROBOT_HOST_CANDIDATES)
+
+# E22-900T22U LoRa radio link (see lora_link.py and link/lora_server.py
+# on Pi #1): tried first by _send_command_with_fallback() below, WiFi/TCP
+# kept as the automatic fallback (2026-10-24 decision, Fabrice) rather
+# than a hard cutover. 2.0s is generous for the module's own air-time
+# latency at a conservative air data rate; lora_link.LORA_ENABLED being
+# unset (default) short-circuits this to an instant no-op, so it costs
+# nothing while the module isn't wired in yet.
+LORA_COMMAND_TIMEOUT = float(os.environ.get("LORA_COMMAND_TIMEOUT", "2.0"))
 
 # Live camera stream -- same candidate addresses as above, different port
 # and its own independent resolver (camera script down != wrong network).
@@ -140,16 +170,50 @@ def _list_media(directory, extensions):
 
 
 def _send_command_with_fallback(command, timeout=2.0):
-    """Like robot_link.send_command(), but tries ROBOT_CONTROL_RESOLVER's
-    candidate hosts in turn until one actually answers (see robot_host.py).
-    Only a connection-level failure (host down/unreachable/wrong network)
-    triggers a rotation to the next candidate -- a reachable Pi #1
-    answering with an ERR sentence, or a malformed response, means the
-    host itself is fine, so that's returned as-is without trying others
-    (trying a *different* address wouldn't explain away a real ERR)."""
+    """Tries the LoRa radio link first (lora_link.send_command), then
+    falls back to ROBOT_CONTROL_RESOLVER's candidate WiFi/TCP hosts (see
+    robot_host.py) -- 2026-10-24 decision (Fabrice): WiFi stays up as an
+    automatic fallback while the radio link is brought up and tuned,
+    rather than a hard cutover. "Did Pi #1 actually answer over the
+    radio" is decided purely by whether lora_result carries a "type" --
+    present means a real ACK/ERR round trip happened (trust it, exactly
+    like a reachable WiFi host's ERR response below, and don't also try
+    WiFi); absent means LoRa is disabled/not installed/unreachable/timed
+    out/garbled, so fall through.
+
+    On the WiFi path: only a connection-level failure (host
+    down/unreachable/wrong network) triggers a rotation to the next
+    candidate -- a reachable Pi #1 answering with an ERR sentence, or a
+    malformed response, means the host itself is fine, so that's
+    returned as-is without trying others (trying a *different* address
+    wouldn't explain away a real ERR)."""
+    lora_result = lora_link.send_command(command, timeout=LORA_COMMAND_TIMEOUT)
+    if lora_result.get("type") is None:
+        # Logged at INFO (not spammed at DEBUG-only) specifically because
+        # this failure mode used to be invisible end-to-end: the 2026-10-24
+        # import-order bug above meant LoRa silently never even tried,
+        # and the UI only ever shows the WINNING transport -- there was no
+        # way to tell "LoRa is disabled" apart from "LoRa tried and failed"
+        # without a one-off script. One line per command is cheap; a
+        # radio link going quiet is exactly the kind of thing worth
+        # finding in `journalctl -u robot-webserver` without re-deriving
+        # a diagnostic script from scratch.
+        log.info("LoRa unavailable for %r (%s) -- falling back to WiFi", command, lora_result.get("error"))
+    if lora_result.get("type") is not None:
+        lora_result["link_bytes_sent"] = get_bytes_sent_since_boot()
+        lora_result["transport"] = "lora"
+        return lora_result
+
     result = None
     for host in ROBOT_CONTROL_RESOLVER.ordered():
         result = send_command(command, host, ROBOT_PORT, timeout=timeout)
+        # Attached here rather than inside robot_link.send_command(), since
+        # it's a live total that's valid regardless of this particular
+        # call's outcome -- /control's status bar (statusLinkBytes) reads
+        # it off of every single response, success or ERR alike, which is
+        # what keeps it updating on every poll without a dedicated endpoint.
+        result["link_bytes_sent"] = get_bytes_sent_since_boot()
+        result["transport"] = "wifi"
         if result.get("error", "").startswith("CONNECTION_ERROR"):
             ROBOT_CONTROL_RESOLVER.report_failure(host)
             continue
@@ -823,6 +887,7 @@ def _control_page(role="admin"):
        is actively misleading while actually piloting) -- just the live
        stream, or a plain placeholder while it's unavailable. */
     .camera-feed-area {{
+      position: relative;
       width: 100%;
       height: 100%;
       min-height: 0;
@@ -837,6 +902,33 @@ def _control_page(role="admin"):
       object-fit: contain;
     }}
     .camera-stream[hidden] {{ display: none; }}
+
+    /* Automatic camera-over-LoRa fallback image (2026-10-24, explicit
+       user request) -- see loraSnapImg/pollLoraSnap() below. Sits in
+       the same spot as .camera-stream (never shown at the same time,
+       see setLoraSnapActive()); the badge floats over its bottom edge
+       to say plainly that this is a radio-relayed, possibly-partial
+       picture, not the normal live feed. */
+    .lora-snap-img {{
+      max-width: 100%;
+      max-height: 100%;
+      border-radius: 8px;
+      object-fit: contain;
+    }}
+    .lora-snap-img[hidden] {{ display: none; }}
+    .lora-snap-badge {{
+      position: absolute;
+      left: 8px;
+      right: 8px;
+      bottom: 8px;
+      background: rgba(13, 17, 23, 0.8);
+      color: #c9d1d9;
+      font-size: 11px;
+      text-align: center;
+      border-radius: 6px;
+      padding: 4px 8px;
+    }}
+    .lora-snap-badge[hidden] {{ display: none; }}
 
     /* GPS map panel (2026-10-05): overrides .panel's own center/center
        alignment (meant for a single centered placeholder) so the map
@@ -1337,6 +1429,10 @@ def _control_page(role="admin"):
         <span class="status-label">Motor R</span>
         <span class="status-value" id="statusMotorRight">--</span>
       </div>
+      <div class="status-metric">
+        <span class="status-label">Link bytes (TX)</span>
+        <span class="status-value" id="statusLinkBytes">--</span>
+      </div>
     </div>
     <div class="status-group status-group-right">
       <span class="status-label">Target position</span>
@@ -1375,6 +1471,8 @@ def _control_page(role="admin"):
       <h2>Camera</h2>
       <div class="camera-feed-area">
         <img class="camera-stream" id="cameraStream" alt="Live camera feed" hidden>
+        <img class="lora-snap-img" id="loraSnapImg" alt="Camera image received over the LoRa radio link" hidden>
+        <div class="lora-snap-badge" id="loraSnapBadge" hidden></div>
         <div class="placeholder" id="cameraPlaceholder">Camera unavailable &mdash; retrying...</div>
       </div>
     </div>
@@ -1482,15 +1580,73 @@ def _control_page(role="admin"):
     cameraStream.addEventListener("load", () => {{
       cameraStream.hidden = false;
       cameraPlaceholder.hidden = true;
+      setLoraSnapActive(false);
     }});
 
     cameraStream.addEventListener("error", () => {{
       cameraStream.hidden = true;
       cameraPlaceholder.hidden = false;
+      setLoraSnapActive(true);
       setTimeout(tryCameraStream, CAMERA_RETRY_MS);
     }});
 
+    // Automatic camera-over-LoRa fallback display (2026-10-24, explicit
+    // user request): while the live WiFi feed above is unreachable,
+    // polls /lora_snap.jpg + /lora_snap_status.json for whatever Pi #1's
+    // automatic LoRa snapshot loop has sent over the radio link (link/
+    // lora_image_streamer.py in the robot repo, "DGPS always wins" --
+    // see that module's docstring for why this can occasionally take a
+    // while or stall). Progressive JPEG means even a still-incomplete
+    // transfer renders a usable (blurrier) picture, which is exactly why
+    // the badge below says "receiving..." rather than implying a sharp,
+    // finished photo. Explicitly NOT the robot's own CAM,SNAP photos
+    // (those live on /media's "Robot camera" carousel instead) -- this
+    // is a separate, automatic, never-persisted-anywhere stream, shown
+    // here only as a last-resort view of where the robot is pointed.
+    const loraSnapImg = document.getElementById("loraSnapImg");
+    const loraSnapBadge = document.getElementById("loraSnapBadge");
+    const LORA_SNAP_POLL_MS = 1500;
+    let loraSnapPollTimer = null;
+    let loraSnapActive = false;
+
+    async function pollLoraSnap() {{
+      let statusData;
+      try {{
+        const res = await fetch("{url_for('lora_snap_status_json')}?t=" + Date.now());
+        statusData = await res.json();
+      }} catch (err) {{
+        return; // webserver hiccup -- keep whatever's already shown, try again next tick
+      }}
+      if (!statusData.available) {{
+        loraSnapImg.hidden = true;
+        loraSnapBadge.hidden = true;
+        return;
+      }}
+      loraSnapImg.src = "{url_for('lora_snap_jpg')}?t=" + Date.now();
+      loraSnapBadge.hidden = false;
+      loraSnapBadge.textContent = statusData.complete
+        ? "LoRa fallback image (radio link) — transfer complete"
+        : "LoRa fallback image (radio link) — receiving...";
+    }}
+
+    loraSnapImg.addEventListener("load", () => {{ loraSnapImg.hidden = false; }});
+    loraSnapImg.addEventListener("error", () => {{ loraSnapImg.hidden = true; }});
+
+    function setLoraSnapActive(active) {{
+      if (active === loraSnapActive) return;
+      loraSnapActive = active;
+      clearInterval(loraSnapPollTimer);
+      if (active) {{
+        pollLoraSnap();
+        loraSnapPollTimer = setInterval(pollLoraSnap, LORA_SNAP_POLL_MS);
+      }} else {{
+        loraSnapImg.hidden = true;
+        loraSnapBadge.hidden = true;
+      }}
+    }}
+
     tryCameraStream();
+    setLoraSnapActive(true); // placeholder is shown by default until the first load/error fires
 
     function timestamp() {{
       const now = new Date();
@@ -1573,6 +1729,13 @@ def _control_page(role="admin"):
           body: JSON.stringify({{command: command}}),
         }});
         data = await res.json();
+        // Rides along on every response (STA background polling, button
+        // presses, typed console commands alike -- whatever just went
+        // through /api/send) rather than its own poll loop: see
+        // _send_command_with_fallback() in app.py for where it's attached.
+        if (typeof data.link_bytes_sent === "number") {{
+          statusLinkBytes.textContent = formatBytes(data.link_bytes_sent);
+        }}
       }} catch (err) {{
         const cmdText = "&gt; " + escapeHtml(command);
         const errText = "request failed: " + escapeHtml(String(err));
@@ -1584,10 +1747,16 @@ def _control_page(role="admin"):
         return {{ok: false, error: String(err)}};
       }}
 
+      // data.transport ("lora" or "wifi", see _send_command_with_fallback()
+      // in app.py) lets the TCP tab double as a quick check that the radio
+      // link is actually the one answering, once it's wired in -- "--"
+      // means neither transport logic ran (e.g. a 4xx before that point).
+      const transportTag = data.transport ? " [" + data.transport + "]" : "";
       const cmdText = "&gt; " + escapeHtml(data.sent || command);
-      const resultText = data.ok
-        ? escapeHtml(data.raw_response || "")
-        : escapeHtml(data.error || data.raw_response || "unknown error");
+      const resultText =
+        (data.ok
+          ? escapeHtml(data.raw_response || "")
+          : escapeHtml(data.error || data.raw_response || "unknown error")) + transportTag;
       const resultCls = data.ok ? "ok" : "err";
 
       tcpLogFrame([{{text: cmdText, cls: "cmd"}}, {{text: resultText, cls: resultCls}}]);
@@ -1655,6 +1824,18 @@ def _control_page(role="admin"):
     const statusSpeed = document.getElementById("statusSpeed");
     const statusMotorLeft = document.getElementById("statusMotorLeft");
     const statusMotorRight = document.getElementById("statusMotorRight");
+    const statusLinkBytes = document.getElementById("statusLinkBytes");
+
+    // link_bytes_sent (see robot_link.get_bytes_sent_since_boot() / Flask's
+    // /api/send) is a byte count, not telemetry about the robot itself, so
+    // it's kept out of resetStatusBar() below -- it stays on screen (it's
+    // still accurate) even while the rest of the status bar blanks out on
+    // a failed poll.
+    function formatBytes(n) {{
+      if (n < 1024) return n + " B";
+      if (n < 1024 * 1024) return (n / 1024).toFixed(1) + " KB";
+      return (n / (1024 * 1024)).toFixed(2) + " MB";
+    }}
 
     // Converts one NMEA ddmm.mmmm-style field (as used by NAV/STA) into
     // decimal degrees. Works for both 2-digit (latitude) and 3-digit
@@ -3210,6 +3391,7 @@ def _media_page(videos=None, images=None, role="admin"):
     /* Video feed panel wrapper: holds either the live camera image or the
        recorded video/placeholder, never both at once (see script below). */
     .video-feed-area {{
+      position: relative;
       width: 100%;
       height: 100%;
       min-height: 200px;
@@ -3227,6 +3409,30 @@ def _media_page(videos=None, images=None, role="admin"):
       object-fit: contain;
     }}
     .camera-stream[hidden] {{ display: none; }}
+
+    /* Automatic camera-over-LoRa fallback image (2026-10-24, explicit
+       user request) -- same idea as /control's own copy of this rule,
+       see loraSnapImg/pollLoraSnap() below. */
+    .lora-snap-img {{
+      max-width: 100%;
+      max-height: 100%;
+      border-radius: 8px;
+      object-fit: contain;
+    }}
+    .lora-snap-img[hidden] {{ display: none; }}
+    .lora-snap-badge {{
+      position: absolute;
+      left: 8px;
+      right: 8px;
+      bottom: 8px;
+      background: rgba(13, 17, 23, 0.8);
+      color: #c9d1d9;
+      font-size: 11px;
+      text-align: center;
+      border-radius: 6px;
+      padding: 4px 8px;
+    }}
+    .lora-snap-badge[hidden] {{ display: none; }}
 
     /* Images panel: single <img>, source swapped every 3s by JS below. */
     .slideshow-img {{
@@ -3298,6 +3504,8 @@ def _media_page(videos=None, images=None, role="admin"):
       <h2>Video feed</h2>
       <div class="video-feed-area">
         <img class="camera-stream" id="cameraStream" alt="Live camera feed" hidden>
+        <img class="lora-snap-img" id="loraSnapImg" alt="Camera image received over the LoRa radio link" hidden>
+        <div class="lora-snap-badge" id="loraSnapBadge" hidden></div>
         <div id="recordedVideoArea">{video_html}</div>
       </div>
     </div>
@@ -3379,15 +3587,68 @@ def _media_page(videos=None, images=None, role="admin"):
     cameraStream.addEventListener("load", () => {{
       cameraStream.hidden = false;
       recordedVideoArea.hidden = true;
+      setLoraSnapActive(false);
     }});
 
     cameraStream.addEventListener("error", () => {{
       cameraStream.hidden = true;
       recordedVideoArea.hidden = false;
+      setLoraSnapActive(true);
       setTimeout(tryCameraStream, CAMERA_RETRY_MS);
     }});
 
+    // Automatic camera-over-LoRa fallback display (2026-10-24, explicit
+    // user request) -- same idea, and same code, as /control's own copy
+    // of this block (see its comment there for the full reasoning):
+    // while the live WiFi feed above is unreachable, polls /lora_snap.
+    // jpg + /lora_snap_status.json for whatever Pi #1's automatic LoRa
+    // snapshot loop has sent over the radio link. Explicitly NOT the
+    // robot's own CAM,SNAP photos (those stay on the "Robot camera"
+    // carousel below) -- a separate, automatic, never-persisted stream.
+    const loraSnapImg = document.getElementById("loraSnapImg");
+    const loraSnapBadge = document.getElementById("loraSnapBadge");
+    const LORA_SNAP_POLL_MS = 1500;
+    let loraSnapPollTimer = null;
+    let loraSnapActive = false;
+
+    async function pollLoraSnap() {{
+      let statusData;
+      try {{
+        const res = await fetch("{url_for('lora_snap_status_json')}?t=" + Date.now());
+        statusData = await res.json();
+      }} catch (err) {{
+        return; // webserver hiccup -- keep whatever's already shown, try again next tick
+      }}
+      if (!statusData.available) {{
+        loraSnapImg.hidden = true;
+        loraSnapBadge.hidden = true;
+        return;
+      }}
+      loraSnapImg.src = "{url_for('lora_snap_jpg')}?t=" + Date.now();
+      loraSnapBadge.hidden = false;
+      loraSnapBadge.textContent = statusData.complete
+        ? "LoRa fallback image (radio link) — transfer complete"
+        : "LoRa fallback image (radio link) — receiving...";
+    }}
+
+    loraSnapImg.addEventListener("load", () => {{ loraSnapImg.hidden = false; }});
+    loraSnapImg.addEventListener("error", () => {{ loraSnapImg.hidden = true; }});
+
+    function setLoraSnapActive(active) {{
+      if (active === loraSnapActive) return;
+      loraSnapActive = active;
+      clearInterval(loraSnapPollTimer);
+      if (active) {{
+        pollLoraSnap();
+        loraSnapPollTimer = setInterval(pollLoraSnap, LORA_SNAP_POLL_MS);
+      }} else {{
+        loraSnapImg.hidden = true;
+        loraSnapBadge.hidden = true;
+      }}
+    }}
+
     tryCameraStream();
+    setLoraSnapActive(true); // recorded-video fallback is shown by default until the first load/error fires
 
     // Images slideshow: swap the <img> source every 3 seconds.
     const slideshowImages = [{image_urls_js}];
@@ -3669,6 +3930,55 @@ def media_camera():
     return Response(relay(), mimetype=content_type)
 
 
+@app.route("/lora_snap.jpg")
+@login_required
+def lora_snap_jpg():
+    """Serves the most recently reassembled automatic LoRa-fallback
+    snapshot (lora_link.get_latest_lora_snapshot(); see link/
+    lora_image_streamer.py on Pi #1 for the sending side) as a plain
+    JPEG, for /control's Camera panel and /media's Video feed panel to
+    show while the normal WiFi feed (/media/camera) is unreachable and
+    the robot is actively driving -- see loraSnapImg/pollLoraSnap() in
+    _control_page()/_media_page() below.
+
+    The bytes returned are whatever CONTIGUOUS prefix of chunks has
+    arrived so far, not necessarily the whole image -- get_latest_
+    lora_snapshot() already picks that prefix, and the capture is
+    always progressive-JPEG-encoded on Pi #1 specifically so a partial
+    file like this still renders a usable (blurrier) picture rather
+    than a broken one. 404 just means "nothing received over LoRa yet",
+    never an error -- the plain <img> this feeds already treats a 404
+    the same as any other unavailable image.
+
+    Explicitly NOT the same thing as the robot's own CAM,SNAP snapshots
+    (/media/thumb/..., /media/robot_feed): this automatic snap is never
+    written to Pi #1's capped snapshot store and never persisted here
+    either -- see get_latest_lora_snapshot()'s own docstring."""
+    image_id, jpeg_bytes, complete = lora_link.get_latest_lora_snapshot()
+    if image_id is None or not jpeg_bytes:
+        abort(404)
+    resp = Response(jpeg_bytes, mimetype="image/jpeg")
+    resp.headers["Cache-Control"] = "no-store"
+    resp.headers["X-Lora-Image-Id"] = str(image_id)
+    resp.headers["X-Lora-Image-Complete"] = "1" if complete else "0"
+    return resp
+
+
+@app.route("/lora_snap_status.json")
+@login_required
+def lora_snap_status_json():
+    """Tiny JSON companion to /lora_snap.jpg above -- lets the frontend
+    show an honest "still receiving..." vs "transfer complete" badge
+    (see pollLoraSnap() below) without having to read response headers
+    off of a plain <img> load, which isn't possible from JS."""
+    image_id, jpeg_bytes, complete = lora_link.get_latest_lora_snapshot()
+    return jsonify({
+        "available": image_id is not None and bool(jpeg_bytes),
+        "image_id": image_id,
+        "complete": complete,
+    })
+
+
 @app.route("/media/videos/<path:filename>")
 @login_required
 def media_video(filename):
@@ -3889,6 +4199,15 @@ if __name__ == "__main__":
     if not (WEBSERVER_USERNAME and WEBSERVER_PASSWORD_HASH):
         print("WARNING: WEBSERVER_USERNAME / WEBSERVER_PASSWORD_HASH not set in .env "
               "-- nobody will be able to log in. See README.md.")
+    # Starts the NTRIP client + 1Hz DGPS correction relay to Pi #1 (see
+    # dgps_relay.py) as two daemon background threads -- started here
+    # rather than at import time so a plain `python3 -c "import app"`
+    # (e.g. for a quick syntax/sanity check) never opens a real network
+    # connection as a side effect. Safe to call even without pygnssutils
+    # installed or without real NTRIP credentials configured (see that
+    # module's own start()/the deprecation docstring on gps/
+    # dgps_transfer.py in the robot repo for why this replaces it).
+    dgps_relay.start()
     # host="0.0.0.0": reachable from other devices on the WiFi, not just
     # from the Pi itself (127.0.0.1). threaded=True: without it, Flask's
     # dev server handles one request at a time -- the live camera proxy

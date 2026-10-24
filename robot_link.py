@@ -11,6 +11,7 @@ decision (plain TCP socket, chosen over MQTT/HTTP for simplicity).
 
 import socket
 
+from link_bytes import record_bytes_sent
 from nmea import SentenceError, build_sentence, parse_sentence
 
 # 200 was plenty while every command fit on one line by hand (STP, DRV,
@@ -37,9 +38,17 @@ def send_command(command_body: str, host: str, port: int, timeout: float = 2.0) 
     sentence_type, fields = parts[0], parts[1:]
     sentence = build_sentence(sentence_type, *fields)
 
+    wire_bytes = (sentence + "\r\n").encode("ascii")
     try:
         with socket.create_connection((host, port), timeout=timeout) as sock:
-            sock.sendall((sentence + "\r\n").encode("ascii"))
+            sock.sendall(wire_bytes)
+            # Counted the moment sendall() returns, not after a successful
+            # response -- the bytes are on the wire either way, and a
+            # timed-out/garbled read below shouldn't make them vanish from
+            # the tally. Shared with lora_link.py's own send function (see
+            # link_bytes.py) so /control's counter is one true total across
+            # both transports.
+            record_bytes_sent(len(wire_bytes))
             response_line = sock.makefile("r").readline().strip()
     except OSError as exc:
         return {"ok": False, "sent": sentence, "error": f"CONNECTION_ERROR:{exc}"}
