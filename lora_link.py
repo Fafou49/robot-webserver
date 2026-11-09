@@ -97,6 +97,24 @@ _image_state = {
     "last_feedback_kind": None,  # "ack" | "nak" | None
 }
 
+# 2026-11-05 field request: the last LoRa image actually shown must STAY
+# displayed on the website for as long as WiFi hasn't come back -- it
+# must never flicker to "unavailable" just because a NEW capture started.
+# Without this, get_latest_lora_snapshot() used to read straight off
+# _image_state above, which _handle_incoming_image_frame() resets to an
+# EMPTY chunks dict the instant Pi #1 starts a new image_id (newest-wins,
+# same convention as every other "latest state" field in this project) --
+# for the whole window between that reset and the new image's first
+# chunk actually arriving (which, on a slow/contended LoRa link, can be
+# seconds), get_latest_lora_snapshot() would report nothing available at
+# all, and the frontend (see pollLoraSnap() in app.py) would hide the
+# perfectly good previous photo for no reason. This cache holds whatever
+# was last ACTUALLY SHOWABLE (a non-empty contiguous prefix) independent
+# of _image_state's own in-progress reassembly, and is only replaced once
+# the image currently being reassembled has itself produced at least one
+# real byte -- see _handle_incoming_image_frame()'s own update of it.
+_last_good_snapshot = {"image_id": None, "jpeg_bytes": b"", "complete": False}
+
 IMAGE_QUIET_PERIOD_S = 1.5        # how long with no new chunk before this image is "worth" feedback
 IMAGE_FEEDBACK_RESEND_S = 2.0     # resend the same NAK/ACK this often, in case it got lost on the air
 IMAGE_FEEDBACK_CHECK_INTERVAL_S = 0.5
@@ -179,7 +197,16 @@ def _handle_incoming_image_frame(frame: dict) -> None:
     NAV/RTE/MOD elsewhere); a chunk that failed its CRC (frame["ok"] is
     False, payload None) is simply not recorded -- it stays "missing"
     exactly as if it had never arrived at all, which is exactly what
-    makes it show up in the next IMGNAK."""
+    makes it show up in the next IMGNAK.
+
+    Also refreshes _last_good_snapshot (2026-11-05) -- but only once the
+    image CURRENTLY being reassembled has produced a non-empty contiguous
+    prefix. Right after the image_id reset just above, that prefix is
+    empty (chunks == {}), so _last_good_snapshot is deliberately left
+    untouched for a beat -- the previous image stays the one
+    get_latest_lora_snapshot() reports until this one has something
+    real to replace it with. See _last_good_snapshot's own module-level
+    comment for the full rationale."""
     with _image_lock:
         if frame["image_id"] != _image_state["image_id"]:
             _image_state["image_id"] = frame["image_id"]
@@ -193,6 +220,17 @@ def _handle_incoming_image_frame(frame: dict) -> None:
         _image_state["last_chunk_at"] = time.time()
         if frame["ok"]:
             _image_state["chunks"][frame["seq"]] = frame["payload"]
+
+        prefix = bytearray()
+        seq = 0
+        while seq in _image_state["chunks"]:
+            prefix += _image_state["chunks"][seq]
+            seq += 1
+        if prefix:  # don't overwrite the last good snapshot with "nothing yet"
+            total = _image_state["total"]
+            _last_good_snapshot["image_id"] = _image_state["image_id"]
+            _last_good_snapshot["jpeg_bytes"] = bytes(prefix)
+            _last_good_snapshot["complete"] = total > 0 and seq >= total
 
 
 def _missing_chunks_locked():
@@ -253,26 +291,27 @@ def _maybe_send_image_feedback():
 
 def get_latest_lora_snapshot():
     """For app.py's display endpoint (/lora_snap.jpg, see that module):
-    returns (image_id, jpeg_bytes, complete) for the currently/most
-    recently reassembled image -- `jpeg_bytes` is the longest CONTIGUOUS
-    prefix of chunks starting from seq 0 (a progressive JPEG stream only
-    decodes meaningfully from the start forward: having chunk 5 without
-    chunk 2 doesn't help a viewer render anything chunk 2 onward), and
-    `complete` is True once every chunk up to `total` has been received.
-    Returns (None, b"", False) if nothing has ever arrived yet."""
+    returns (image_id, jpeg_bytes, complete) for the last image that was
+    actually SHOWABLE (a non-empty contiguous prefix) -- `jpeg_bytes` is
+    the longest CONTIGUOUS prefix of chunks starting from seq 0 (a
+    progressive JPEG stream only decodes meaningfully from the start
+    forward: having chunk 5 without chunk 2 doesn't help a viewer render
+    anything chunk 2 onward), and `complete` is True once every chunk up
+    to `total` had been received as of that snapshot.
+
+    2026-11-05: reads _last_good_snapshot rather than recomputing from
+    the live _image_state -- the live buffer legitimately goes back to
+    empty for a beat every time Pi #1 starts a new capture (see
+    _handle_incoming_image_frame()), and this must keep reporting the
+    PREVIOUS image through that gap rather than flashing to "nothing
+    available" (see pollLoraSnap() in app.py, which hides the picture
+    entirely on that signal). Returns (None, b"", False) if nothing has
+    ever been received at all."""
     with _image_lock:
-        image_id = _image_state["image_id"]
-        total = _image_state["total"]
-        chunks = _image_state["chunks"]
+        image_id = _last_good_snapshot["image_id"]
         if image_id is None:
             return None, b"", False
-        prefix = bytearray()
-        seq = 0
-        while seq in chunks:
-            prefix += chunks[seq]
-            seq += 1
-        complete = total > 0 and seq >= total
-        return image_id, bytes(prefix), complete
+        return image_id, _last_good_snapshot["jpeg_bytes"], _last_good_snapshot["complete"]
 
 
 def _reader_loop(stop_event: threading.Event) -> None:

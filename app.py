@@ -984,14 +984,18 @@ def _control_page(role="admin"):
     .map-dot-route {{ background: #f85149; }}
     .map-dot-media {{ background: #8957e5; }}
 
-    /* Solar-exposure map overlay (2026-10-07, explicit user request):
-       a toggle row under the existing map-legend, shown whenever the
-       map panel is visible (not gated on the checkbox itself -- the
-       legend/gradient only has to look right once data has loaded, see
-       updateSolarLegend() below). Same dashed-divider trick as
-       .return-progress's own panel-within-a-panel styling elsewhere in
-       this file, to visually separate it from the legend above. */
-    .solar-toggle-row {{
+    /* Solar-exposure + obstacle map toggles (2026-10-07 / 2026-10-18,
+       both explicit user requests), SHARING one row as of 2026-11-05
+       (also explicit, "same line, for the biggest map possible" --
+       .gps-map above is flex:1, so every row removed from underneath it
+       in .map-wrap's column flex gives it back that exact height).
+       Shown whenever the map panel is visible (not gated on either
+       checkbox -- each legend/gradient only has to look right once its
+       own data has loaded, see updateSolarLegend()/updateObstacleLegend()
+       below). Same dashed-divider trick as .return-progress's own
+       panel-within-a-panel styling elsewhere in this file, to visually
+       separate this row from the legend above. */
+    .map-toggle-row {{
       flex: 0 0 auto;
       display: flex;
       align-items: center;
@@ -1043,26 +1047,14 @@ def _control_page(role="admin"):
        logged by the front/rear ultrasonic sensors -- see
        link/power_history.py's obstacle_log table + OBS sentence,
        fetched via /api/obstacle_map -> power_history_client.py's
-       fetch_obstacle_points(). Same toggle-row family as
-       .solar-toggle-row above (own dashed divider, same label/legend
-       shape) rather than a shared class, since the two rows' legends
-       differ (gradient bar vs a plain swatch + count). NO SENSOR DATA
-       YET as of this writing -- the row renders, the checkbox works,
-       the layer legitimately shows "0 points" until the hardware and
-       its Pi #1 logging code exist (see the "Pi 1 implementation
-       notes" doc) -- this is provisioned ahead of that, same spirit as
-       the backend table/frame it reads from. */
-    .obstacle-toggle-row {{
-      flex: 0 0 auto;
-      display: flex;
-      align-items: center;
-      gap: 16px;
-      flex-wrap: wrap;
-      font-size: 11px;
-      color: #8b949e;
-      padding-top: 6px;
-      border-top: 1px dashed #30363d;
-    }}
+       fetch_obstacle_points(). Shares .map-toggle-row above with the
+       solar toggle (own label/legend classes below, since the two
+       legends differ -- gradient bar vs a plain swatch + count). NO
+       SENSOR DATA YET as of this writing -- the row renders, the
+       checkbox works, the layer legitimately shows "0 points" until the
+       hardware and its Pi #1 logging code exist (see the "Pi 1
+       implementation notes" doc) -- this is provisioned ahead of that,
+       same spirit as the backend table/frame it reads from. */
     .obstacle-toggle-label {{
       display: inline-flex;
       align-items: center;
@@ -1498,7 +1490,7 @@ def _control_page(role="admin"):
           <span><i class="obstacle-swatch"></i>Obstacles (ultrasonic)</span>
           <span class="map-hint">Scroll to zoom &middot; double-click to reset &middot; right-click any point to delete</span>
         </div>
-        <div class="solar-toggle-row">
+        <div class="map-toggle-row">
           <label class="solar-toggle-label">
             <input type="checkbox" id="solarMapToggle">
             Solar exposure map
@@ -1509,8 +1501,6 @@ def _control_page(role="admin"):
             High
             <span class="solar-legend-note" id="solarLegendNote"></span>
           </span>
-        </div>
-        <div class="obstacle-toggle-row">
           <label class="obstacle-toggle-label">
             <input type="checkbox" id="obstacleMapToggle">
             Obstacle map (ultrasonic)
@@ -1568,6 +1558,8 @@ def _control_page(role="admin"):
     // few seconds until the robot's camera script is actually reachable.
     const cameraStream = document.getElementById("cameraStream");
     const cameraPlaceholder = document.getElementById("cameraPlaceholder");
+    const loraSnapImg = document.getElementById("loraSnapImg");
+    const loraSnapBadge = document.getElementById("loraSnapBadge");
     const CAMERA_URL = "{url_for('media_camera')}";
     const CAMERA_RETRY_MS = 5000;
 
@@ -1577,16 +1569,27 @@ def _control_page(role="admin"):
       cameraStream.src = CAMERA_URL + "?t=" + Date.now();
     }}
 
+    // Exactly one of the WiFi feed, the LoRa fallback image, or this
+    // placeholder text is ever shown at a time (2026-11-05, explicit user
+    // request: the placeholder used to stay visible underneath the LoRa
+    // image instead of making way for it). Call this after touching
+    // either cameraStream.hidden or loraSnapImg.hidden instead of ever
+    // setting cameraPlaceholder.hidden directly, so it can't go stale
+    // relative to whichever of the other two actually ended up visible.
+    function refreshCameraFallback() {{
+      cameraPlaceholder.hidden = !(cameraStream.hidden && loraSnapImg.hidden);
+    }}
+
     cameraStream.addEventListener("load", () => {{
       cameraStream.hidden = false;
-      cameraPlaceholder.hidden = true;
       setLoraSnapActive(false);
+      refreshCameraFallback();
     }});
 
     cameraStream.addEventListener("error", () => {{
       cameraStream.hidden = true;
-      cameraPlaceholder.hidden = false;
       setLoraSnapActive(true);
+      refreshCameraFallback();
       setTimeout(tryCameraStream, CAMERA_RETRY_MS);
     }});
 
@@ -1603,8 +1606,16 @@ def _control_page(role="admin"):
     // (those live on /media's "Robot camera" carousel instead) -- this
     // is a separate, automatic, never-persisted-anywhere stream, shown
     // here only as a last-resort view of where the robot is pointed.
-    const loraSnapImg = document.getElementById("loraSnapImg");
-    const loraSnapBadge = document.getElementById("loraSnapBadge");
+    //
+    // 2026-11-05: the backend now keeps reporting the LAST image that
+    // was actually shown, even while a newer capture is still in flight
+    // (see get_latest_lora_snapshot()'s own 2026-11-05 update in the
+    // robot-webserver project's lora_link.py) -- so "available" below
+    // basically only ever reads false before the very first LoRa image
+    // has ever arrived, not in the gaps between captures. That's exactly
+    // the explicit requirement: the last LoRa photo stays on screen for
+    // as long as WiFi hasn't come back, never flickering to the
+    // placeholder just because Pi #1 started a new capture.
     const LORA_SNAP_POLL_MS = 1500;
     let loraSnapPollTimer = null;
     let loraSnapActive = false;
@@ -1620,6 +1631,7 @@ def _control_page(role="admin"):
       if (!statusData.available) {{
         loraSnapImg.hidden = true;
         loraSnapBadge.hidden = true;
+        refreshCameraFallback();
         return;
       }}
       loraSnapImg.src = "{url_for('lora_snap_jpg')}?t=" + Date.now();
@@ -1629,8 +1641,8 @@ def _control_page(role="admin"):
         : "LoRa fallback image (radio link) — receiving...";
     }}
 
-    loraSnapImg.addEventListener("load", () => {{ loraSnapImg.hidden = false; }});
-    loraSnapImg.addEventListener("error", () => {{ loraSnapImg.hidden = true; }});
+    loraSnapImg.addEventListener("load", () => {{ loraSnapImg.hidden = false; refreshCameraFallback(); }});
+    loraSnapImg.addEventListener("error", () => {{ loraSnapImg.hidden = true; refreshCameraFallback(); }});
 
     function setLoraSnapActive(active) {{
       if (active === loraSnapActive) return;
@@ -1642,11 +1654,13 @@ def _control_page(role="admin"):
       }} else {{
         loraSnapImg.hidden = true;
         loraSnapBadge.hidden = true;
+        refreshCameraFallback();
       }}
     }}
 
     tryCameraStream();
-    setLoraSnapActive(true); // placeholder is shown by default until the first load/error fires
+    setLoraSnapActive(true);
+    refreshCameraFallback(); // both still hidden at this point -- placeholder shows until the first load/error
 
     function timestamp() {{
       const now = new Date();
@@ -1953,6 +1967,21 @@ def _control_page(role="admin"):
           ? formatLatLon(curLat, curLon)
           : "GPS unavailable";
 
+        // Robot's live map marker (2026-11-09, explicit user request):
+        // only ever MOVED by a real fix -- deliberately never cleared back
+        // to null just because this one poll came back without a usable
+        // position (link/gps_reader.py's own documented failure mode is
+        // "degrades silently to the 0.0 placeholder", not an error, so a
+        // single empty frame here says nothing about whether the robot's
+        // last real position is still good). pollMap() below reads
+        // lastRobotLatLon to draw the green marker, so leaving it alone
+        // here is what makes that marker persist on the map instead of
+        // vanishing every time a frame carries nothing.
+        if (hasCurrent) {{
+          lastRobotLatLon = {{lat: curLat, lon: curLon}};
+          lastSpeedKmhForProgress = parseFloat(speed) || 0;
+        }}
+
         const tLat = nmeaToDecimal(targetLat, targetLatDir);
         const tLon = nmeaToDecimal(targetLon, targetLonDir);
         const hasTarget = tLat !== null && (tLat !== 0 || tLon !== 0);
@@ -1967,6 +1996,32 @@ def _control_page(role="admin"):
           statusDistance.textContent = "--";
           statusBearing.textContent = "--";
         }}
+
+        // Bulk-load-once / refresh-only-on-change for the map's WPT/GRT/
+        // MED markers (2026-11-09, see the lastSeen*Count comment above
+        // for the full design): route_total/wpt_count/media_count are
+        // STA's three new trailing fields (fields[15:18], extend-only --
+        // an older robot (or a cached response during a brief
+        // reconnect) simply won't have them yet, hence the length guard).
+        // lastSeenRouteCount stands in for "has pollMap() populated its
+        // baseline yet" (it sets all three together, see pollMap() below)
+        // -- skip comparing until it has, so the page-load bulk fetch
+        // always wins this race rather than pollMap() being called twice
+        // in a row for no reason.
+        if (data.fields.length >= 18 && lastSeenRouteCount !== null) {{
+          const routeCount = parseInt(data.fields[15], 10) || 0;
+          const wptCount = parseInt(data.fields[16], 10) || 0;
+          const medCount = parseInt(data.fields[17], 10) || 0;
+          if (routeCount !== lastSeenRouteCount || wptCount !== lastSeenWptCount || medCount !== lastSeenMedCount) {{
+            pollMap();
+          }}
+        }}
+
+        // Redraw now, even though pollMap() itself may not be running this
+        // tick -- this is what actually makes the persisted/updated robot
+        // marker (lastRobotLatLon, set above) visible between pollMap()
+        // runs rather than only every 5s as before.
+        redrawMap();
       }} catch (err) {{
         resetStatusBar();
       }} finally {{
@@ -2364,9 +2419,44 @@ def _control_page(role="admin"):
     let mapLastWaypointPts = [];
     // The robot's own last-known position (from STA), kept outside
     // pollMap()'s own scope so showMapTooltip() can compute "distance to
-    // robot" for a hovered marker -- null whenever there's no live fix,
-    // so the tooltip can say so rather than show a stale distance.
+    // robot" for a hovered marker. Null only until the very first real fix
+    // ever arrives -- once set, this PERSISTS the last known position
+    // rather than being cleared back to null whenever a given STA poll
+    // doesn't carry a usable fix (2026-11-09, explicit user request: "la
+    // position GPS ne doit pas passer a 'vide' lorsqu'une trame ne
+    // transmet rien"). See pollStatus() below, the only place this is
+    // ever written.
     let lastRobotLatLon = null;
+    // speed_kmh from the same STA poll that last updated lastRobotLatLon
+    // above -- pollMap()'s progress-bar ETA used to re-read this straight
+    // off its own separate STA fetch; now that pollMap() no longer fetches
+    // STA at all (see pollMap() below), it reads this instead.
+    let lastSpeedKmhForProgress = 0;
+
+    // GPS map bulk-load/incremental-refresh (2026-11-09, explicit user
+    // request): "les points GPS de la map ... [doivent être] chargés en
+    // masse uniquement lors de l'appel de la page control. ensuite
+    // uniquement les nouveaux points sont a transmettre lorsque
+    // l'utilisateur de la manette crée un point." WPT/GRT/MED (the
+    // waypoint/route/media LISTS, each a full re-send of every point --
+    // see pollMap() below) used to be re-fetched on their own blind 5s
+    // timer regardless of whether anything had actually changed. Now
+    // pollMap() itself only ever runs: once at page load (the bulk load),
+    // right after a delete the operator just confirmed on this page
+    // (already wired into deleteWaypointPoint()/deleteRoutePoint()/
+    // deleteMediaPoint() below), and whenever pollStatus()'s own
+    // already-frequent STA poll notices one of the three cheap counts
+    // below has moved since pollMap() last ran -- i.e. the robot itself
+    // gained or lost a waypoint/route point/photo-video since the website
+    // last asked (a save-waypoint button press, a new RTE upload, a new
+    // CAM,SNAP/VID, an arrival that consumed a return-route waypoint, ...).
+    // Null until pollMap() has completed at least once, which both lets
+    // the page-load bulk fetch win the inevitable race against
+    // pollStatus()'s own first tick (see pollStatus() below) and avoids
+    // ever treating "no comparison baseline yet" as "something changed".
+    let lastSeenRouteCount = null;
+    let lastSeenWptCount = null;
+    let lastSeenMedCount = null;
 
     // Computes the auto-fit bounding box of `points`' own lat/lon values,
     // with a small fixed-size padding on a degenerate (0/1 distinct
@@ -2616,13 +2706,26 @@ def _control_page(role="admin"):
       gpsMapSvg.appendChild(group);
     }}
 
-    // Redraws every currently-known point (mapLastPoints/
-    // mapLastWaypointPts, refreshed by pollMap() every 5s) against
-    // mapBounds -- called both after a fresh poll and immediately after
-    // a wheel-zoom/double-click reset, so zooming feels instant rather
-    // than waiting for the next network round-trip.
+    // Redraws every currently-known point against mapBounds -- called
+    // both after a fresh poll (from pollStatus() every 3s AND from
+    // pollMap() whenever it actually runs, see each below) and
+    // immediately after a wheel-zoom/double-click reset, so zooming feels
+    // instant rather than waiting for the next network round-trip.
+    //
+    // The robot's own green marker (2026-11-09) is built fresh from
+    // lastRobotLatLon on EVERY call rather than being baked into
+    // mapLastPoints by pollMap() -- lastRobotLatLon is updated by
+    // pollStatus() every 3s (and persists across a frame with no fix, see
+    // that function's own comment), while mapLastPoints (the static
+    // waypoint/route/media markers) now only changes when pollMap()
+    // actually runs (bulk load once, then only on a real change -- see
+    // pollMap() below). Keeping the robot marker out of mapLastPoints is
+    // what lets it stay live at pollStatus()'s 3s cadence independent of
+    // how rarely pollMap() itself now runs.
     function redrawMap() {{
-      const points = mapLastPoints;
+      const points = lastRobotLatLon
+        ? [{{lat: lastRobotLatLon.lat, lon: lastRobotLatLon.lon, color: MAP_COLORS.robot, radius: 6, label: "Robot"}}, ...mapLastPoints]
+        : mapLastPoints;
       clearMap();
       if (points.length === 0) return;
       if (!mapUserZoomed || !mapBounds) {{
@@ -2714,39 +2817,27 @@ def _control_page(role="admin"):
     }}
 
     let mapPollBusy = false;
+    // Bulk load + refresh-on-change for the static (waypoint/route/media)
+    // markers (2026-11-09, see the lastSeen*Count comment near
+    // lastRobotLatLon above for the full design this implements). No
+    // longer on its own blind timer -- called once at page load (below),
+    // from the delete handlers right after the operator confirms a
+    // deletion (deleteWaypointPoint()/deleteRoutePoint()/
+    // deleteMediaPoint(), unchanged), and from pollStatus() whenever its
+    // cheap STA counts show one of these three lists actually changed on
+    // the robot. No longer fetches STA itself either -- the robot's live
+    // position/speed (for the progress bar) and its own map marker both
+    // now come from pollStatus()'s own already-frequent STA poll (see
+    // lastRobotLatLon/lastSpeedKmhForProgress and redrawMap() above).
     async function pollMap() {{
       if (mapPollBusy) return;
       mapPollBusy = true;
       try {{
-        const [staData, wptData, grtData, medData] = await Promise.all([
-          sendToRobot("STA"), sendToRobot("WPT"), sendToRobot("GRT"), sendToRobot("MED"),
+        const [wptData, grtData, medData] = await Promise.all([
+          sendToRobot("WPT"), sendToRobot("GRT"), sendToRobot("MED"),
         ]);
 
         const points = [];
-        let robotFixOk = false;
-        let robotLatForProgress = null, robotLonForProgress = null;
-        // STA field order (see pollStatus() above/link/server.py): speed
-        // is fields[5] -- pollStatus()'s own parsed copy is out of scope
-        // here, hence this second, independent read from pollMap()'s own
-        // STA fetch for the progress bar's ETA.
-        let speedKmhForProgress = 0;
-
-        if (staData.ok && staData.fields && staData.fields.length >= 4) {{
-          const [lat, latDir, lon, lonDir] = staData.fields;
-          const curLat = nmeaToDecimal(lat, latDir);
-          const curLon = nmeaToDecimal(lon, lonDir);
-          if (curLat !== null && (curLat !== 0 || curLon !== 0)) {{
-            points.push({{lat: curLat, lon: curLon, color: MAP_COLORS.robot, radius: 6, label: "Robot"}});
-            lastRobotLatLon = {{lat: curLat, lon: curLon}};
-            robotFixOk = true;
-            robotLatForProgress = curLat;
-            robotLonForProgress = curLon;
-          }}
-          if (staData.fields.length >= 6) {{
-            speedKmhForProgress = parseFloat(staData.fields[5]) || 0;
-          }}
-        }}
-        if (!robotFixOk) lastRobotLatLon = null;
 
         const waypointPts = wptData.ok ? decodeLatLonList(wptData.fields) : [];
         waypointPts.forEach((p, i) => {{
@@ -2782,7 +2873,9 @@ def _control_page(role="admin"):
         }}
         updateReturnProgress(
           grtFullRoute.slice(grtRouteIndex), grtRouteIndex, grtMode,
-          robotLatForProgress, robotLonForProgress, speedKmhForProgress
+          lastRobotLatLon ? lastRobotLatLon.lat : null,
+          lastRobotLatLon ? lastRobotLatLon.lon : null,
+          lastSpeedKmhForProgress
         );
 
         if (lastNavSent) {{
@@ -2793,9 +2886,10 @@ def _control_page(role="admin"):
           }});
         }}
 
+        let medCount = 0;
         if (medData.ok && medData.fields && medData.fields.length >= 1) {{
-          const count = parseInt(medData.fields[0], 10) || 0;
-          for (let i = 0; i < count; i++) {{
+          medCount = parseInt(medData.fields[0], 10) || 0;
+          for (let i = 0; i < medCount; i++) {{
             const [filename, kind, lat, latDir, lon, lonDir, ts] = medData.fields.slice(1 + i * 7, 8 + i * 7);
             const dLat = nmeaToDecimal(lat, latDir);
             const dLon = nmeaToDecimal(lon, lonDir);
@@ -2813,6 +2907,17 @@ def _control_page(role="admin"):
 
         mapLastPoints = points;
         mapLastWaypointPts = waypointPts;
+        // Record the baseline pollStatus() compares its own cheap STA
+        // counts against from now on (see that function's change-
+        // detection block above) -- set together, after a successful
+        // fetch of all three, so a partial failure above (wptData.ok
+        // false, say) can't record a baseline for lists that weren't
+        // actually refreshed this time. route_total's own count is
+        // simply the route length GRT just returned, same reasoning WPT/
+        // MED already use for waypointPts.length/medCount.
+        lastSeenRouteCount = grtData.ok ? grtFullRoute.length : lastSeenRouteCount;
+        lastSeenWptCount = wptData.ok ? waypointPts.length : lastSeenWptCount;
+        lastSeenMedCount = medData.ok ? medCount : lastSeenMedCount;
         redrawMap();
       }} catch (err) {{
         // Silent on failure, same spirit as pollStatus() above.
@@ -2821,7 +2926,6 @@ def _control_page(role="admin"):
       }}
     }}
     pollMap();
-    setInterval(pollMap, 5000);
 
     // Controls panel: one full-width button per command a human actually
     // needs a shortcut for (see pages/protocole_controle.html for the
@@ -3575,6 +3679,8 @@ def _media_page(videos=None, images=None, role="admin"):
     // switches over on its own once the live feed becomes available.
     const cameraStream = document.getElementById("cameraStream");
     const recordedVideoArea = document.getElementById("recordedVideoArea");
+    const loraSnapImg = document.getElementById("loraSnapImg");
+    const loraSnapBadge = document.getElementById("loraSnapBadge");
     const CAMERA_URL = "{url_for('media_camera')}";
     const CAMERA_RETRY_MS = 5000;
 
@@ -3584,16 +3690,27 @@ def _media_page(videos=None, images=None, role="admin"):
       cameraStream.src = CAMERA_URL + "?t=" + Date.now();
     }}
 
+    // Exactly one of the WiFi feed, the LoRa fallback image, or the
+    // recorded-video playlist is ever shown at a time (2026-11-05,
+    // explicit user request -- same fix as /control's own copy of this
+    // block). Call this after touching either cameraStream.hidden or
+    // loraSnapImg.hidden instead of ever setting recordedVideoArea.hidden
+    // directly, so it can't go stale relative to whichever of the other
+    // two actually ended up visible.
+    function refreshCameraFallback() {{
+      recordedVideoArea.hidden = !(cameraStream.hidden && loraSnapImg.hidden);
+    }}
+
     cameraStream.addEventListener("load", () => {{
       cameraStream.hidden = false;
-      recordedVideoArea.hidden = true;
       setLoraSnapActive(false);
+      refreshCameraFallback();
     }});
 
     cameraStream.addEventListener("error", () => {{
       cameraStream.hidden = true;
-      recordedVideoArea.hidden = false;
       setLoraSnapActive(true);
+      refreshCameraFallback();
       setTimeout(tryCameraStream, CAMERA_RETRY_MS);
     }});
 
@@ -3605,8 +3722,12 @@ def _media_page(videos=None, images=None, role="admin"):
     // snapshot loop has sent over the radio link. Explicitly NOT the
     // robot's own CAM,SNAP photos (those stay on the "Robot camera"
     // carousel below) -- a separate, automatic, never-persisted stream.
-    const loraSnapImg = document.getElementById("loraSnapImg");
-    const loraSnapBadge = document.getElementById("loraSnapBadge");
+    //
+    // 2026-11-05: see /control's own copy of this comment -- the backend
+    // now keeps reporting the last image actually shown across the gap
+    // between captures, so the last LoRa photo stays on screen for as
+    // long as WiFi hasn't come back, never flickering back to the
+    // recorded-video fallback just because a new capture started.
     const LORA_SNAP_POLL_MS = 1500;
     let loraSnapPollTimer = null;
     let loraSnapActive = false;
@@ -3622,6 +3743,7 @@ def _media_page(videos=None, images=None, role="admin"):
       if (!statusData.available) {{
         loraSnapImg.hidden = true;
         loraSnapBadge.hidden = true;
+        refreshCameraFallback();
         return;
       }}
       loraSnapImg.src = "{url_for('lora_snap_jpg')}?t=" + Date.now();
@@ -3631,8 +3753,8 @@ def _media_page(videos=None, images=None, role="admin"):
         : "LoRa fallback image (radio link) — receiving...";
     }}
 
-    loraSnapImg.addEventListener("load", () => {{ loraSnapImg.hidden = false; }});
-    loraSnapImg.addEventListener("error", () => {{ loraSnapImg.hidden = true; }});
+    loraSnapImg.addEventListener("load", () => {{ loraSnapImg.hidden = false; refreshCameraFallback(); }});
+    loraSnapImg.addEventListener("error", () => {{ loraSnapImg.hidden = true; refreshCameraFallback(); }});
 
     function setLoraSnapActive(active) {{
       if (active === loraSnapActive) return;
@@ -3644,11 +3766,13 @@ def _media_page(videos=None, images=None, role="admin"):
       }} else {{
         loraSnapImg.hidden = true;
         loraSnapBadge.hidden = true;
+        refreshCameraFallback();
       }}
     }}
 
     tryCameraStream();
-    setLoraSnapActive(true); // recorded-video fallback is shown by default until the first load/error fires
+    setLoraSnapActive(true);
+    refreshCameraFallback(); // both still hidden at this point -- recorded video shows until the first load/error
 
     // Images slideshow: swap the <img> source every 3 seconds.
     const slideshowImages = [{image_urls_js}];
